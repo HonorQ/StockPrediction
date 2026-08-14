@@ -1,0 +1,512 @@
+"""
+反馈循环编排器 — 每日自动归因 + IC衰减监控 + 自适应权重调整 + ML重训练
+
+执行流程:
+1. 加载历史推荐，对有T+N收益数据的做因子归因
+2. 统计因子命中率/失败率，定位最弱的因子
+3. 加载IC历史，检测IC衰减
+4. 自动调整衰退因子的权重（全局 factor-level）
+5. 调整每只股票的 per-stock 因子权重（Step 3 新增）
+6. 定期 (每7天) 重训练ML模型
+
+支持两种调用模式：
+- 生产模式：today=None，使用 datetime.now()，写入 weight_history / model_versions
+- 回测模式：today="YYYY-MM-DD"，所有时间引用使用 today，避免未来函数
+"""
+import os
+import json
+import sys
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+from collections import defaultdict
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'src'))
+
+from src.data.database import StockDatabase, SUB_SCORE_DIMS
+from src.engine.factor_attribution import FactorAttribution, AttributionAggregator
+from src.engine.ml_selector import MLStockSelector, FactorOptimizer
+
+
+RETRAIN_INTERVAL_DAYS = 7       # 每7天重训练一次
+MIN_ATTRIBUTION_SAMPLES = 5     # 最少归因样本数才调权（低于此阈值统计噪声过大）
+FAILURE_WEIGHT_PENALTY = 0.5    # 失败率>30%的因子权重乘数
+MAX_WEIGHT_CHANGE = 0.05        # 单次最大权重调整幅度
+
+
+class FeedbackLoop:
+    def __init__(self, config: Dict = None,
+                 stock_weight_manager=None):
+        """Args:
+            config: 配置字典（含 weights 等）
+            stock_weight_manager: 可选的 StockWeightManager 实例。
+                传入时启用 per-stock 权重调整；不传则只跑全局 factor-level 调权。
+        """
+        self.db = StockDatabase()
+        self.config = config or {}
+        self.stock_weight_manager = stock_weight_manager
+
+    def run_all(self, today: str = None, skip_ml: bool = False,
+                skip_weight_adjustment: bool = False) -> Dict:
+        """运行完整反馈循环。
+        Args:
+            today: 当前回测日（YYYY-MM-DD）。None 时使用真实当前日期（生产模式）。
+            skip_ml: True 时跳过 ML 重训练（回测通常跳过，避免污染生产模型）。
+            skip_weight_adjustment: True 时跳过全局权重调整（回测时跳过，避免慢速API调用）。
+        """
+        if today is None:
+            today = datetime.now().strftime("%Y-%m-%d")
+        result = {
+            "date": today,
+            "attribution_done": False,
+            "ic_analysis_done": False,
+            "weight_adjusted": False,
+            "stock_weight_adjusted": False,
+            "model_retrained": False,
+            "messages": [],
+        }
+        market_fetcher = None
+        try:
+            from src.data.market_data import MarketDataFetcher
+            market_fetcher = MarketDataFetcher()
+        except Exception:
+            pass
+
+        # Step 1: 因子归因
+        try:
+            n_attr = self._run_attribution(market_fetcher, today=today)
+            result["attribution_done"] = True
+            result["n_attributions"] = n_attr
+            result["messages"].append(f"归因完成: {n_attr} 条")
+        except Exception as e:
+            result["messages"].append(f"归因失败: {e}")
+
+        # Step 2: IC分析
+        try:
+            ic_result = self._run_ic_analysis(today=today)
+            result["ic_analysis_done"] = True
+            result["ic_summary"] = ic_result
+            result["messages"].append(f"IC分析完成: {len(ic_result.get('factors', {}))} 因子")
+        except Exception as e:
+            result["messages"].append(f"IC分析失败: {e}")
+
+        # Step 3: 全局权重调整（基于归因+IC，factor-level）
+        if not skip_weight_adjustment:
+            try:
+                weight_changes = self._adjust_weights(today=today)
+                if weight_changes:
+                    result["weight_adjusted"] = True
+                    result["weight_changes"] = weight_changes
+                    result["messages"].append(f"全局权重调整: {len(weight_changes)} 因子")
+            except Exception as e:
+                result["messages"].append(f"权重调整失败: {e}")
+
+        # Step 4: 个股因子权重调整（per-stock，新增）
+        if self.stock_weight_manager is not None:
+            try:
+                stock_changes = self._adjust_stock_weights(today)
+                if stock_changes:
+                    result["stock_weight_adjusted"] = True
+                    result["stock_weight_changes"] = stock_changes
+                    total = sum(len(v) for v in stock_changes.values())
+                    result["messages"].append(
+                        f"个股权重调整: {len(stock_changes)} 只股票 / {total} 因子"
+                    )
+            except Exception as e:
+                result["messages"].append(f"个股权重调整失败: {e}")
+
+        # Step 5: ML重训练（可跳过）
+        if not skip_ml:
+            try:
+                retrained = self._maybe_retrain_model(today)
+                if retrained:
+                    result["model_retrained"] = True
+                    result["model_metrics"] = retrained
+                    result["messages"].append(
+                        f"模型重训练: {retrained.get('model_type')} "
+                        f"acc={retrained.get('accuracy')}"
+                    )
+            except Exception as e:
+                result["messages"].append(f"ML重训练失败: {e}")
+
+        return result
+
+    def _run_attribution(self, market_fetcher=None, today: str = None) -> int:
+        """对有T+N收益数据的推荐做归因。
+        today: 回测日。None 时使用真实当前日期。
+        归因窗口自适应：仅处理 trade_date <= today 的推荐（避免未来函数）。
+        """
+        if today is None:
+            today = datetime.now().strftime("%Y-%m-%d")
+        # 取最近 60 天的推荐（覆盖 T+14 窗口），但只归因 trade_date <= today 的
+        all_recs = self.db.get_recent_recommendations(days=365)
+        recs = [r for r in all_recs if r.get("trade_date", "") <= today]
+
+        count = 0
+        # 一次取出已存在的归因记录，避免 N+1 查询
+        existing = self.db.get_attribution_history(days=90)
+        existing_keys = {
+            (r.get("code"), r.get("trade_date")) for r in existing
+        }
+
+        for rec in recs:
+            # 优先 T+14（主信号），fallback 到 d10/d5/d3/d1
+            actual_return = (rec.get("d14_return") or rec.get("d10_return")
+                             or rec.get("d5_return") or rec.get("d3_return")
+                             or rec.get("d1_return"))
+            if actual_return is None:
+                continue
+            trade_date = rec.get("trade_date", "")
+            code = rec.get("code", "")
+            if (code, trade_date) in existing_keys:
+                continue
+            sub_scores = self._get_sub_scores_for_recommendation(rec)
+            if not sub_scores:
+                continue
+            rec["sub_scores"] = sub_scores
+            attr = FactorAttribution(rec, actual_return)
+            attr_dict = attr.to_dict()
+            self.db.save_attribution(
+                trade_date=attr_dict["trade_date"],
+                code=attr_dict["code"],
+                name=attr_dict["name"],
+                score=attr_dict["score"],
+                actual_return=attr_dict["actual_return"],
+                factor_results=attr_dict["factor_results"],
+                is_failure=attr_dict["is_failure"],
+            )
+            count += 1
+        return count
+
+    def _get_sub_scores_for_recommendation(self, rec: Dict) -> Dict:
+        """获取推荐的子评分 — 优先从 factor_snapshots 精确查询，fallback 到 factors 字段"""
+        trade_date = rec.get("trade_date", "")
+        code = rec.get("code", "")
+        # 优先: 按 trade_date+code 精确查询 factor_snapshots（避免 limit/排序漏查）
+        sub = self.db.get_factor_snapshot_by_code_date(trade_date, code)
+        if sub and isinstance(sub, dict):
+            return sub
+        # fallback: 从 recommendations.factors JSON 字段解析
+        factors_raw = rec.get("factors")
+        if factors_raw and isinstance(factors_raw, str):
+            try:
+                factors = json.loads(factors_raw)
+                sub = {}
+                for k in ["trend", "strategy", "chip", "fundamental", "institutional",
+                          "sector_rotation", "oversold_rebound", "news", "relative_strength",
+                          "ashare_specific", "quant_behavior", "margin_trading", "shareholder",
+                          "lockup_risk", "research", "dragon_tiger", "leader", "deep_research",
+                          "policy_event", "national_team", "capital_behavior"]:
+                    v = factors.get(k) or factors.get(f"score_{k}")
+                    if v is not None:
+                        sub[k] = float(v)
+                return sub
+            except Exception:
+                pass
+        return {}
+
+    def _run_ic_analysis(self, today: str = None) -> Dict:
+        """计算最近14天因子IC，与30天IC对比检测衰减。
+        注意：IC 基于 factor_snapshots（当日候选池，已过初筛），属于"候选池内 IC"，
+        系统性高于全市场 IC。主要用于检测衰减趋势（差值），不作为绝对预测力指标。
+        today: 回测日。None 时使用真实当前日期。
+        """
+        if today is None:
+            today = datetime.now().strftime("%Y-%m-%d")
+        from src.data.market_data import MarketDataFetcher
+        mf = MarketDataFetcher()
+
+        factor_data = self._build_ic_dataset(days=30, today=today)
+        if factor_data.empty:
+            return {"status": "no_data"}
+
+        optimizer = FactorOptimizer()
+        recent_cutoff = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=14)).strftime("%Y-%m-%d")
+        ic_recent = optimizer.calculate_ic(
+            factor_data[factor_data["trade_date"] >= recent_cutoff]
+        ) if not factor_data.empty else {}
+        ic_all = optimizer.calculate_ic(factor_data)
+
+        self.db.save_ic_record(today, ic_all, window_days=30, sample_count=len(factor_data))
+        if ic_recent:
+            self.db.save_ic_record(today + "_14d", ic_recent, window_days=14, sample_count=len(factor_data))
+
+        decay_factors = {}
+        for factor in ic_all:
+            if factor in ic_recent:
+                decay = ic_recent[factor] - ic_all[factor]
+                if decay < -0.05:
+                    decay_factors[factor] = {
+                        "ic_all": round(ic_all[factor], 3),
+                        "ic_recent": round(ic_recent[factor], 3),
+                        "decay": round(decay, 3),
+                    }
+
+        return {
+            "status": "ok",
+            "factors": {k: round(v, 3) for k, v in ic_all.items()},
+            "decay_factors": decay_factors,
+        }
+
+    def _build_ic_dataset(self, days: int = 60, today: str = None) -> pd.DataFrame:
+        """从factor_snapshots构建24维 sub_* IC数据集。
+
+        直接 JOIN recommendations 取 T+N 真实收益（get_sub_score_panel），
+        一次性批量返回，无 30 天窗口限制。
+
+        注意：样本来自当日候选池（已过初筛），存在选择偏差，IC 系统性偏高。
+        主要用于检测 IC 衰减趋势，不宜直接当作全市场预测力。
+        today: 回测日。传入时仅使用 trade_date <= today 的快照（避免未来函数）。
+        """
+        if today is None:
+            today = datetime.now().strftime("%Y-%m-%d")
+        rows = self.db.get_sub_score_panel(days=days, today=today)
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        df.rename(columns={"code": "stock_code"}, inplace=True)
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+
+        dims = [c for c in SUB_SCORE_DIMS if c in df.columns]
+        for dim in dims:
+            df[dim] = pd.to_numeric(df[dim], errors="coerce")
+        df.dropna(subset=dims, how="all", inplace=True)
+        for dim in dims:
+            df[dim] = df[dim].fillna(50)
+        return df
+
+    def _get_future_return(self, code: str, date_str: str, days: int = 3) -> Optional[float]:
+        """从数据库已存收益获取，不再重复拉取收盘价"""
+        field_map = {1: "d1_return", 3: "d3_return", 5: "d5_return",
+                     10: "d10_return", 14: "d14_return"}
+        field = field_map.get(days)
+        if not field:
+            return None
+        recs = self.db.get_recommendation_history(code, days=30)
+        for r in recs:
+            if r.get("trade_date") == date_str:
+                return r.get(field)
+        return None
+
+    def _adjust_weights(self, today: str = None) -> List[Dict]:
+        """基于归因统计+IC分析自动调整权重（全局 factor-level）。
+        调整后自动写回 config.yaml（IC优化的权重/归因惩罚权重的合并结果）。
+        today: 回测日。None 时使用真实当前日期。
+        """
+        if today is None:
+            today = datetime.now().strftime("%Y-%m-%d")
+        all_attr = self.db.get_attribution_history(days=60)
+        if not all_attr:
+            return []
+
+        from collections import defaultdict
+        today_dt = datetime.strptime(today, "%Y-%m-%d")
+        latest_ic = self.db.get_latest_ic(days=14)
+        changes = []
+
+        # 1) 时序衰减归因统计 + 连续失败检测
+        factor_stats = {}
+        factor_daily = defaultdict(list)
+        for record in all_attr:
+            try:
+                rec_date = datetime.strptime(record["trade_date"], "%Y-%m-%d")
+                days_ago = (today_dt - rec_date).days
+            except Exception:
+                days_ago = 999
+            if days_ago <= 5:
+                decay = 1.0
+            elif days_ago <= 15:
+                decay = 0.7
+            elif days_ago <= 30:
+                decay = 0.4
+            else:
+                decay = 0.2
+
+            factor_results = record.get("factor_results", {})
+            for factor, result in factor_results.items():
+                res = result.get("result", "neutral")
+                if factor not in factor_stats:
+                    factor_stats[factor] = {"weighted_correct": 0.0, "weighted_wrong": 0.0, "total_weight": 0.0}
+                if res == "correct":
+                    factor_stats[factor]["weighted_correct"] += decay
+                    factor_stats[factor]["total_weight"] += decay
+                elif res == "wrong":
+                    factor_stats[factor]["weighted_wrong"] += decay
+                    factor_stats[factor]["total_weight"] += decay
+                factor_daily[factor].append({"date": record["trade_date"], "result": res})
+
+        # 连续失败检测（从最新日期往回数，连续 wrong 的交易日数）
+        consecutive_failures = {}
+        for factor, daily_list in factor_daily.items():
+            daily_list.sort(key=lambda x: x["date"], reverse=True)
+            count = 0
+            for entry in daily_list:
+                if entry["result"] == "wrong":
+                    count += 1
+                elif entry["result"] == "correct":
+                    break
+            if count >= 3:
+                consecutive_failures[factor] = count
+
+        # 2) 时序衰减惩罚调权
+        for factor, stats in factor_stats.items():
+            if stats["total_weight"] < MIN_ATTRIBUTION_SAMPLES:
+                continue
+            weighted_wrong_rate = stats["weighted_wrong"] / stats["total_weight"]
+
+            if weighted_wrong_rate < 0.3:
+                continue
+            # 失败率 [0.3, 0.5) 中等惩罚砍半；>=0.5 严重失败砍 7 成
+            penalty = FAILURE_WEIGHT_PENALTY if weighted_wrong_rate < 0.5 else 0.7
+            if consecutive_failures.get(factor, 0) >= 3:
+                penalty = min(penalty + 0.2, 0.7)
+
+            current_weight = (self.config.get("weights") or {}).get(factor, 0.05)
+            new_weight = round(max(current_weight * (1 - penalty), 0.005), 4)
+            new_weight = max(new_weight, current_weight - MAX_WEIGHT_CHANGE)
+            new_weight = round(new_weight, 4)
+
+            if abs(new_weight - current_weight) >= 0.005:
+                changes.append({
+                    "factor": factor,
+                    "old_weight": current_weight,
+                    "new_weight": new_weight,
+                    "wrong_rate": round(weighted_wrong_rate, 2),
+                    "reason": f"时序衰减失败率{weighted_wrong_rate:.0%}, 连续错误{consecutive_failures.get(factor, 0)}天",
+                })
+                self.db.save_weight_update(
+                    today, factor, current_weight, new_weight,
+                    reason=changes[-1]["reason"],
+                )
+
+        # 3) IC优化调权：基于近期IC重新分配权重（24 维 sub_*，与 config.yaml.weights 一一对应）
+        try:
+            from src.engine.ml_selector import FactorOptimizer
+            optimizer = FactorOptimizer()
+            factor_data = self._build_ic_dataset(days=60, today=today)
+            if factor_data is not None and not factor_data.empty and "future_return" in factor_data.columns:
+                opt_weights = optimizer.optimize_weights(factor_data, return_col="future_return")
+                if opt_weights:
+                    weights = self.config.get("weights") or {}
+                    for name, opt_w in opt_weights.items():
+                        cur_w = weights.get(name, 0)
+                        if abs(opt_w - cur_w) > MAX_WEIGHT_CHANGE:
+                            clip_w = cur_w + (MAX_WEIGHT_CHANGE if opt_w > cur_w else -MAX_WEIGHT_CHANGE)
+                            changes.append({
+                                "factor": name,
+                                "old_weight": cur_w,
+                                "new_weight": round(clip_w, 4),
+                                "wrong_rate": 0,
+                                "reason": f"IC优化: IC={optimizer.factor_ic.get(name, 0):+.4f}",
+                            })
+                            self.db.save_weight_update(
+                                today, name, cur_w, round(clip_w, 4),
+                                reason=changes[-1]["reason"],
+                            )
+        except Exception:
+            pass
+
+        # 4) 归一化（仅更新内存中的 config 对象，不写回 config.yaml）
+        # 规则 §6：config.yaml 是静态先验，不被反馈循环改写。
+        # 调权结果已在第 2、3 步通过 save_weight_update 落库到 weight_history 表。
+        # scorer 次日启动时通过 db.get_latest_weights() 从库读取最新权重，
+        # 叠加到 config.yaml 静态权重上生效，无需覆盖写回 config.yaml。
+        if changes:
+            # 归一化 changes（保证被调因子的权重之和不变）
+            try:
+                if self.config:
+                    weights_dict = self.config.setdefault("weights", {})
+                    for ch in changes:
+                        weights_dict[ch["factor"]] = ch["new_weight"]
+                    # 归一化确保所有权重之和 = 1
+                    total = sum(weights_dict.values()) or 1
+                    if abs(total - 1.0) > 0.01:
+                        for k in weights_dict:
+                            weights_dict[k] = round(max(weights_dict[k] / total, 0.001), 4)
+            except Exception as e:
+                logger.warning("内存权重归一化失败: %s", e)
+
+        return changes
+
+    def _adjust_stock_weights(self, today: str) -> Dict[str, List[Dict]]:
+        """对当天有新归因数据的股票批量调整 per-stock 因子权重。
+        返回 {code: [changes]}。
+        """
+        if self.stock_weight_manager is None:
+            return {}
+
+        # 收集所有归因记录，按 code 分组
+        all_attr = self.db.get_attribution_history(days=365)
+        if not all_attr:
+            return {}
+
+        attr_by_code: Dict[str, List[Dict]] = defaultdict(list)
+        for rec in all_attr:
+            code = rec.get("code", "")
+            if code:
+                attr_by_code[code].append(rec)
+
+        if not attr_by_code:
+            return {}
+
+        # 批量调权
+        codes = list(attr_by_code.keys())
+        return self.stock_weight_manager.adjust_weights_for_codes(
+            codes=codes,
+            trade_date=today,
+            attribution_by_code=attr_by_code,
+        )
+
+    def _maybe_retrain_model(self, today: str) -> Optional[Dict]:
+        """每RETRAIN_INTERVAL_DAYS天重训练一次ML模型。
+        today: 回测日。None 时使用真实当前日期。
+        """
+        if today is None:
+            today = datetime.now().strftime("%Y-%m-%d")
+        latest = self.db.get_latest_model_version()
+        if latest:
+            last_train = latest.get("trained_at", "")
+            try:
+                last_date = datetime.strptime(last_train[:10], "%Y-%m-%d")
+                today_date = datetime.strptime(today, "%Y-%m-%d")
+                if (today_date - last_date).days < RETRAIN_INTERVAL_DAYS:
+                    return None
+            except Exception:
+                pass
+
+        selector = MLStockSelector()
+        factor_data = self._build_ic_dataset(days=90, today=today)
+        if factor_data.empty or len(factor_data) < 50:
+            return None
+
+        data_for_training = []
+        for _, row in factor_data.iterrows():
+            data_for_training.append({
+                "date": row["trade_date"].strftime("%Y-%m-%d") if hasattr(row["trade_date"], "strftime") else str(row["trade_date"]),
+                "stock_code": row["stock_code"],
+                "factors": {dim: row[dim] for dim in factor_data.columns
+                           if dim not in ["trade_date", "stock_code", "future_return"]},
+                "future_return": row["future_return"],
+            })
+
+        df = selector.prepare_training_data(data_for_training, min_return=0.01)
+        if df.empty:
+            return None
+
+        dates = [d["date"] for d in data_for_training]
+        metrics = selector.train(df, dates=dates)
+
+        version = f"v{today.replace('-', '')}"
+        self.db.save_model_version(
+            version=version,
+            trained_at=today,
+            model_type=metrics.get("model_type", "unknown"),
+            metrics=metrics,
+            top_features=metrics.get("top_features", []),
+            model_path=metrics.get("model_saved", ""),
+        )
+        return metrics

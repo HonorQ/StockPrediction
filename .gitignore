@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+
+# 数据文件（过大，不入库）
+data/*.db
+data/*.db-journal
+
+# 模型文件
+models/*.pkl
+models/*.json
+
+# 缓存
+cache/
+
+# 日志
+logs/
+src/logs/
+
+# 生成的报告
+reports/
+
+# 临时/备份文件
+*.bak
+*.bak_p*
+
+# 环境
+.venv/
+venv/
+.env
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,131 @@
+filter:
+  max_recommend: 2
+  min_score: 50
+  min_strong_signals: 1
+  entry_risk:
+    max_gap_open_prob: 70
+    block_high_chip: true
+    block_volume_divergence: true
+  intraday_crash:
+    limit_down_threshold: 30
+    avg_change_threshold: -1.5
+global_markets:
+- keyword: 道琼斯
+  name: 道琼斯
+- keyword: 标普
+  name: 标普500
+- keyword: 纳指
+  name: 纳斯达克
+- keyword: 恒生
+  name: 恒生指数
+- keyword: 原油
+  name: 纽约原油
+- keyword: 黄金
+  name: 纽约黄金
+keywords:
+  company:
+  - 重组
+  - 并购
+  - 业绩
+  - 增持
+  - 回购
+  - 分红
+  - 解禁
+  industry:
+  - 芯片
+  - 人工智能
+  - AI
+  - 新能源
+  - 光伏
+  - 半导体
+  - 军工
+  - 医药
+  negative:
+  - 利空
+  - 下跌
+  - 暴雷
+  - 处罚
+  - 减持
+  - 跌停
+  - 暴跌
+  policy:
+  - 央行
+  - 国务院
+  - 证监会
+  - 降准
+  - 降息
+  - LPR
+  - MLF
+  - 逆回购
+  positive:
+  - 利好
+  - 突破
+  - 增长
+  - 超预期
+  - 涨停
+  - 大涨
+  - 创新高
+  rumor:
+  - 传
+  - 据称
+  - 消息称
+  - 市场传闻
+  - 小作文
+proxy:
+  enabled: false
+  list: []
+  max_fails: 3
+stock:
+  exclude_boards:
+  - '300'
+  - '301'
+  - '688'
+  exclude_new: true
+  exclude_st: true
+  market: all
+  min_market_cap: 50
+  min_turnover: 10000
+  new_days: 60
+technical:
+  atr_period: 14
+  boll_period: 20
+  boll_std: 2
+  ma_periods:
+  - 5
+  - 10
+  - 20
+  - 60
+  macd_fast: 12
+  macd_signal: 9
+  macd_slow: 26
+  rsi_period: 6
+trade:
+  max_hold_days: 3
+  stop_loss_pct: -0.05
+  take_profit_pct: 0.08
+  max_stop_loss_pct: -0.08
+weights:
+  ashare_specific: 0.01
+  capital_behavior: 0.0915
+  chip: 0.0274
+  circulate_holder: 0.0274
+  deep_research: 0.01
+  dragon_tiger: 0.0537
+  fundamental: 0.0566
+  holder_concentration: 0.0456
+  institutional: 0.0566
+  leader: 0.0537
+  lockup_risk: 0.0366
+  margin_trading: 0.0537
+  moat: 0.0366
+  national_team: 0.0366
+  news: 0.064
+  oversold_rebound: 0.01
+  policy_event: 0.0732
+  quant_behavior: 0.01
+  relative_strength: 0.009
+  research: 0.0537
+  sector_rotation: 0.0566
+  shareholder: 0.0366
+  strategy: 0.01
+  trend: 0.01

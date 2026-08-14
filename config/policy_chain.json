@@ -1,0 +1,206 @@
+{
+  "_说明": "政策传导链映射：政策事件→受影响行业→代表性个股",
+  "_更新频率": "季度更新（重大政策变化时即时更新）",
+
+  "monetary_policy": {
+    "_说明": "货币政策类事件",
+    "降准": {
+      "impact": "high",
+      "direction": "positive",
+      "duration_months": 6,
+      "affected_sectors": ["银行", "券商", "房地产", "保险", "有色金属"],
+      "reasoning": "降准释放流动性，利好资金敏感型行业"
+    },
+    "降息": {
+      "impact": "high",
+      "direction": "positive",
+      "duration_months": 6,
+      "affected_sectors": ["银行", "券商", "房地产", "保险", "建材", "家电"],
+      "reasoning": "降息降低融资成本，利好高负债行业"
+    },
+    "加息": {
+      "impact": "high",
+      "direction": "negative",
+      "duration_months": 6,
+      "affected_sectors": ["银行", "券商", "房地产", "保险"],
+      "reasoning": "加息增加融资成本，利空高负债行业"
+    },
+    "MLF操作": {
+      "impact": "medium",
+      "direction": "neutral",
+      "duration_months": 1,
+      "affected_sectors": ["银行", "券商"],
+      "reasoning": "MLF操作反映央行流动性管理意图"
+    },
+    "逆回购": {
+      "impact": "low",
+      "direction": "neutral",
+      "duration_months": 0.5,
+      "affected_sectors": ["银行"],
+      "reasoning": "日常流动性调节，影响有限"
+    }
+  },
+
+  "fiscal_policy": {
+    "_说明": "财政政策类事件",
+    "减税降费": {
+      "impact": "high",
+      "direction": "positive",
+      "duration_months": 12,
+      "affected_sectors": ["全部行业"],
+      "reasoning": "减税降费直接提升企业盈利"
+    },
+    "基建投资": {
+      "impact": "high",
+      "direction": "positive",
+      "duration_months": 12,
+      "affected_sectors": ["基建", "水泥", "钢铁", "机械", "建材"],
+      "reasoning": "基建投资直接拉动相关产业链"
+    },
+    "消费补贴": {
+      "impact": "medium",
+      "direction": "positive",
+      "duration_months": 6,
+      "affected_sectors": ["家电", "汽车", "消费电子", "零售"],
+      "reasoning": "消费补贴刺激终端需求"
+    },
+    "房地产松绑": {
+      "impact": "high",
+      "direction": "positive",
+      "duration_months": 12,
+      "affected_sectors": ["房地产", "建材", "家电", "装修", "银行"],
+      "reasoning": "房地产政策放松直接利好地产链"
+    }
+  },
+
+  "industry_policy": {
+    "_说明": "产业政策类事件",
+    "新能源补贴": {
+      "impact": "high",
+      "direction": "positive",
+      "duration_months": 24,
+      "affected_sectors": ["光伏", "锂电", "储能", "风电", "新能源汽车"],
+      "reasoning": "新能源补贴直接利好相关产业链"
+    },
+    "芯片扶持": {
+      "impact": "high",
+      "direction": "positive",
+      "duration_months": 24,
+      "affected_sectors": ["半导体", "芯片", "光刻机", "EDA", "国产替代"],
+      "reasoning": "芯片扶持政策利好国产替代"
+    },
+    "医药集采": {
+      "impact": "high",
+      "direction": "negative",
+      "duration_months": 12,
+      "affected_sectors": ["医药", "医疗器械", "药品流通"],
+      "reasoning": "集采压低药品价格，利空医药行业"
+    },
+    "AI政策支持": {
+      "impact": "high",
+      "direction": "positive",
+      "duration_months": 24,
+      "affected_sectors": ["人工智能", "算力", "数据中心", "机器人"],
+      "reasoning": "AI政策直接利好AI产业链"
+    },
+    "军工装备采购": {
+      "impact": "high",
+      "direction": "positive",
+      "duration_months": 12,
+      "affected_sectors": ["军工", "航空航天", "船舶", "兵器"],
+      "reasoning": "军工装备采购直接利好军工企业"
+    }
+  },
+
+  "geopolitical": {
+    "_说明": "地缘政治/国际事件",
+    "贸易制裁": {
+      "impact": "high",
+      "direction": "mixed",
+      "duration_months": 12,
+      "affected_sectors": ["国产替代", "内需消费", "出口导向型行业"],
+      "reasoning": "贸易制裁利空出口，利好国产替代"
+    },
+    "科技封锁": {
+      "impact": "high",
+      "direction": "mixed",
+      "duration_months": 24,
+      "affected_sectors": ["半导体", "AI", "国产替代", "科技出口"],
+      "reasoning": "科技封锁利空技术进口，利好国产替代"
+    },
+    "原油暴涨": {
+      "impact": "high",
+      "direction": "mixed",
+      "duration_months": 3,
+      "affected_sectors": ["石油", "化工", "煤炭", "新能源"],
+      "reasoning": "原油暴涨利好能源板块，利空交通运输"
+    },
+    "黄金暴涨": {
+      "impact": "medium",
+      "direction": "positive",
+      "duration_months": 3,
+      "affected_sectors": ["黄金", "贵金属", "避险资产"],
+      "reasoning": "黄金暴涨反映避险情绪，利好黄金股"
+    }
+  },
+
+  "macro_indicators": {
+    "_说明": "宏观经济指标异常",
+    "PMI回升至荣枯线上方": {
+      "impact": "high",
+      "direction": "positive",
+      "duration_months": 3,
+      "affected_sectors": ["制造业", "有色金属", "化工", "机械"],
+      "reasoning": "PMI回升反映经济景气度改善"
+    },
+    "PMI跌破荣枯线": {
+      "impact": "high",
+      "direction": "negative",
+      "duration_months": 3,
+      "affected_sectors": ["制造业", "有色金属", "化工", "机械"],
+      "reasoning": "PMI下降反映经济景气度恶化"
+    },
+    "CPI通缩": {
+      "impact": "high",
+      "direction": "negative",
+      "duration_months": 6,
+      "affected_sectors": ["消费", "银行", "房地产"],
+      "reasoning": "通缩反映需求不足，经济下行压力"
+    },
+    "M2流动性过剩": {
+      "impact": "medium",
+      "direction": "positive",
+      "duration_months": 6,
+      "affected_sectors": ["券商", "有色金属", "房地产"],
+      "reasoning": "流动性过剩利好资产价格"
+    }
+  },
+
+  "stock_keywords": {
+    "_说明": "新闻中直接提到个股的关键词映射",
+    "业绩超预期": {
+      "direction": "positive",
+      "affected_sectors": ["该公司所属行业"]
+    },
+    "大股东增持": {
+      "direction": "positive",
+      "affected_sectors": ["该公司所属行业"]
+    },
+    "大股东减持": {
+      "direction": "negative",
+      "affected_sectors": ["该公司所属行业"]
+    },
+    "重组并购": {
+      "direction": "positive",
+      "affected_sectors": ["该公司所属行业"]
+    },
+    "暴雷": {
+      "direction": "negative",
+      "affected_sectors": ["该公司所属行业"]
+    },
+    "处罚": {
+      "direction": "negative",
+      "affected_sectors": ["该公司所属行业"]
+    }
+  }
+}
