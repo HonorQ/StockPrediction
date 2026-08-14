@@ -38,7 +38,7 @@ Write-Host "[OK] Compressed: $Archive ($SizeMB MB)" -ForegroundColor Green
 # Upload
 if (Get-Command gh -ErrorAction SilentlyContinue) {
     $Tag = "data-backup-$Stamp"
-    gh release create $Tag --repo $Repo --title "Data backup $Stamp" --notes "stock_history.db auto compressed backup" --clobber 2>$null
+    gh release create $Tag --repo $Repo --title "Data backup $Stamp" --notes "stock_history.db auto compressed backup" 2>$null
     if ($?) {
         gh release upload $Tag $Archive --repo $Repo --clobber
         if ($?) {
