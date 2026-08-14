@@ -9,9 +9,7 @@ __pycache__/
 data/*.db
 data/*.db-journal
 
-# 模型文件
-models/*.pkl
-models/*.json
+# 模型文件（.pkl 走 Git LFS 跟踪，meta.json 正常提交）
 
 # 缓存
 cache/
@@ -26,6 +24,7 @@ reports/
 # 临时/备份文件
 *.bak
 *.bak_p*
+backups/
 
 # 环境
 .venv/
