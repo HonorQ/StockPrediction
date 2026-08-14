@@ -105,7 +105,8 @@ class ProxyManager:
         else:
             os.environ.pop("HTTP_PROXY", None)
             os.environ.pop("HTTPS_PROXY", None)
-            os.environ.pop("NO_PROXY", None)
+            # 无代理时强制全直连，避免 Windows 残留系统代理把请求发往失效地址
+            os.environ["NO_PROXY"] = "*"
 
     def mark_failed(self, proxy: Optional[Dict[str, str]]):
         if not proxy:

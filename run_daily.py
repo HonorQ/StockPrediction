@@ -24,8 +24,10 @@ from src.utils.log import get_logger
 
 logger = get_logger()
 
-# 绕过系统代理：对东财等数据源域名不走代理
-_NO_PROXY = "localhost,127.*,192.168.*,10.*,172.16.*,*.eastmoney.com,*.gtimg.cn,*.sina.com.cn,*.cls.cn,*.baostock.com"
+# 绕过系统代理：项目数据源均为国内站点，强制全部直连。
+# 不设此项时，Windows 残留的系统代理(如 Clash 关闭后仍指向 127.0.0.1:7897)
+# 会让 requests 把请求发给不存在的代理导致大面积超时。
+_NO_PROXY = "*"
 os.environ["NO_PROXY"] = _NO_PROXY
 os.environ["no_proxy"] = _NO_PROXY
 
