@@ -385,6 +385,34 @@ def _filter_high_risk_entries(stocks: list, filter_cfg: dict) -> list:
     return filtered
 
 
+def _refresh_intraday_gap_signal(change_pct, base_sig):
+    """用当日实时涨跌幅重算次日高开/低开信号，替换盘前缓存的过期信号。
+
+    盘前缓存的 gap_open_probability / gap_reasons 由 NextDayPredictor 基于"最近交易日"K线
+    计算（8/17 案例：周五涨>5%的票，周一午后仍被当"今日大涨追涨"误拦，导致午后 0 推荐）。
+    午后/盘中运行时"今日"已变化，须用当日实时涨跌幅重算：
+      - 当日涨 >+5%  → 真追高，判"今日大涨"(gap=70) 拦截
+      - 当日跌 <-3%  → 真弱势，判"次日低开概率70%"(gap=30) 拦截
+      - 其余(横盘/温和波动) → gap=50 中性，不触发追涨/低开拦截
+    保留与"今日涨跌"无关的原始理由（持续性/套牢盘等风险信息）。
+    """
+    base = base_sig or {}
+    reasons = [
+        r for r in (base.get("gap_reasons", []) or [])
+        if not any(k in str(r) for k in ("今日大涨", "今日上涨", "今日下跌", "次日高开概率", "次日低开概率"))
+    ]
+    chg = float(change_pct or 0)
+    if chg > 5:
+        gap = 70
+        reasons.append("今日大涨，次日高开概率70%")
+    elif chg < -3:
+        gap = 30
+        reasons.append("今日下跌，次日低开概率70%")
+    else:
+        gap = 50
+    return {"gap_open_probability": gap, "reasons": reasons}
+
+
 def _check_crash_and_close_positions(fresh, config):
     """检测大盘崩盘(跌停潮/全市场暴跌),对 open paper_trades 止损清仓。
     解决7-24案例:盘前开仓后当天崩盘,纸面交易要到次日premarket才检查止损,损失已扩大。
@@ -1584,13 +1612,14 @@ def run_intraday(config):
         risk_inputs = []
         for c in updated:
             sig = c.get("signals", {}) or {}
+            gap = _refresh_intraday_gap_signal(c.get("intraday_change", 0), sig)
             risk_inputs.append({
                 "code": c["code"],
                 "name": c["name"],
                 "factors": {
                     "next_day_prediction": {
-                        "gap_open_probability": sig.get("gap_open_probability", 0),
-                        "reasons": sig.get("gap_reasons", []),
+                        "gap_open_probability": gap["gap_open_probability"],
+                        "reasons": gap["reasons"],
                     },
                     "sustainability_risks": c.get("sustainability_risks", []) or [],
                 },
@@ -1893,13 +1922,14 @@ def run_afternoon(config):
         for c in updated:
             src = cand_by_code.get(c["code"], {})
             sig = src.get("signals", {}) or {}
+            gap = _refresh_intraday_gap_signal(c.get("change_pct", 0), sig)
             risk_inputs.append({
                 "code": c["code"],
                 "name": c["name"],
                 "factors": {
                     "next_day_prediction": {
-                        "gap_open_probability": sig.get("gap_open_probability", 0),
-                        "reasons": sig.get("gap_reasons", []),
+                        "gap_open_probability": gap["gap_open_probability"],
+                        "reasons": gap["reasons"],
                     },
                     "sustainability_risks": src.get("sustainability_risks", []) or [],
                 },
