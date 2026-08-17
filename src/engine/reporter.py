@@ -882,15 +882,24 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
     def _build_history(self, history_records: List[Dict]) -> str:
         if not history_records:
             return ""
+        # 按日期分组：覆盖最近 N 天、每天最多2条，避免单日多条推荐占满回顾表
+        # （8/14 案例：同一天盘前+午后产生 9 条推荐，旧的 [:10] 直接挤掉其他天）
+        from collections import defaultdict
+        by_date = defaultdict(list)
+        for h in history_records:
+            by_date[h["trade_date"]].append(h)
+        days = sorted(by_date.keys(), reverse=True)[:7]
         rows = []
-        for h in history_records[:10]:
-            d1 = f'{h.get("d1_return", 0):+.1f}%' if h.get("d1_return") is not None else "-"
-            d3 = f'{h.get("d3_return", 0):+.1f}%' if h.get("d3_return") is not None else "-"
-            d5 = f'{h.get("d5_return", 0):+.1f}%' if h.get("d5_return") is not None else "-"
-            d10 = f'{h.get("d10_return", 0):+.1f}%' if h.get("d10_return") is not None else "-"
-            d1_cls = "up" if h.get("d1_return", 0) and h["d1_return"] > 0 else ("down" if h.get("d1_return", 0) and h["d1_return"] < 0 else "flat")
-            d3_cls = "up" if h.get("d3_return", 0) and h["d3_return"] > 0 else ("down" if h.get("d3_return", 0) and h["d3_return"] < 0 else "flat")
-            rows.append(f'<tr><td>{h["trade_date"]}</td><td>{h["code"]}</td><td>{h["name"]}</td><td>{h["score"]}</td><td class="{d1_cls}">{d1}</td><td class="{d3_cls}">{d3}</td><td>{d5}</td><td>{d10}</td></tr>')
+        for d in days:
+            recs = sorted(by_date[d], key=lambda x: x.get("score", 0), reverse=True)[:2]
+            for h in recs:
+                d1 = f'{h.get("d1_return", 0):+.1f}%' if h.get("d1_return") is not None else "-"
+                d3 = f'{h.get("d3_return", 0):+.1f}%' if h.get("d3_return") is not None else "-"
+                d5 = f'{h.get("d5_return", 0):+.1f}%' if h.get("d5_return") is not None else "-"
+                d10 = f'{h.get("d10_return", 0):+.1f}%' if h.get("d10_return") is not None else "-"
+                d1_cls = "up" if h.get("d1_return", 0) and h["d1_return"] > 0 else ("down" if h.get("d1_return", 0) and h["d1_return"] < 0 else "flat")
+                d3_cls = "up" if h.get("d3_return", 0) and h["d3_return"] > 0 else ("down" if h.get("d3_return", 0) and h["d3_return"] < 0 else "flat")
+                rows.append(f'<tr><td>{h["trade_date"]}</td><td>{h["code"]}</td><td>{h["name"]}</td><td>{h["score"]}</td><td class="{d1_cls}">{d1}</td><td class="{d3_cls}">{d3}</td><td>{d5}</td><td>{d10}</td></tr>')
         return f"""
 <section class="sec">历史推荐回顾</section>
 <div class="card">
