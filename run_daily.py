@@ -347,22 +347,30 @@ def _filter_high_risk_entries(stocks: list, filter_cfg: dict) -> list:
         risks = f.get("sustainability_risks", []) or []
 
         reject_reason = None
+        all_reasons = [str(r) for r in list(reasons) + list(risks)]
         # 1. 今日大涨(entry前一日>5%) → 追涨风险
-        if gap_prob >= max_gap_prob and any("今日大涨" in str(r) for r in reasons):
+        if gap_prob >= max_gap_prob and any("今日大涨" in r for r in all_reasons):
             reject_reason = "今日大涨追涨"
         # 2. 套牢盘很重(距20日高点<-10%, 从risk字符串提取数值判断)
         elif block_high_chip:
-            for r in risks:
-                r_str = str(r)
-                if "套牢盘" in r_str:
-                    m = re.search(r'距20日高点([-\d.]+)%', r_str)
+            for r in all_reasons:
+                if "套牢盘" in r:
+                    m = re.search(r'距20日高点([-\d.]+)%', r)
                     if m and float(m.group(1)) <= -10:
-                        reject_reason = "套牢盘很重(%s)" % r_str
+                        reject_reason = "套牢盘很重(%s)" % r
                         break
         # 3. 量价背离(价涨量缩/放量滞涨)
         if not reject_reason and block_volume_divergence:
-            if any("价涨量缩" in str(r) or "放量滞涨" in str(r) for r in risks):
+            if any("价涨量缩" in r or "放量滞涨" in r for r in all_reasons):
                 reject_reason = "量价背离"
+        # 4. 次日低开概率高(系统预判次日低开, e.g. "今日下跌，次日低开概率70%")
+        if not reject_reason:
+            m = re.search(r'次日低开概率(\d+)%', " ".join(all_reasons))
+            if m and int(m.group(1)) >= 60:
+                reject_reason = "次日低开概率高(%s%%)" % m.group(1)
+        # 5. 历史类似反弹后易下跌(历史反弹后多日走弱, 反弹延续性差)
+        if not reject_reason and any("历史类似反弹" in r for r in all_reasons):
+            reject_reason = "历史类似反弹后易下跌"
 
         if reject_reason:
             rejected.append((s.get("code", ""), s.get("name", ""), reject_reason))
@@ -1238,6 +1246,9 @@ def run_premarket(config):
     }
     for s in scored_stocks:
         f = s["factors"]
+        nd = f.get("next_day_prediction", {})
+        if not isinstance(nd, dict):
+            nd = {}
         cache_data["candidates"].append({
             "code": s["code"],
             "name": s["name"],
@@ -1252,6 +1263,9 @@ def run_premarket(config):
                 "volume_price_up": f.get("volume_price_up", 0),
                 "breakout_20d_high": f.get("breakout_20d_high", 0),
                 "next_day_prediction": str(f.get("next_day_prediction", "neutral")),
+                "next_day": nd,
+                "gap_open_probability": nd.get("gap_open_probability", 0) or 0,
+                "gap_reasons": nd.get("reasons", []) or [],
                 "oversold_rebound_detected": f.get("oversold_rebound_detected", False),
                 "quant_risk": f.get("quant_risk", "low"),
                 "quant_detected": f.get("quant_detected", False),
@@ -1262,6 +1276,7 @@ def run_premarket(config):
             "news_score": f.get("news_score", 50),
             "hot_money_score": f.get("hot_money_score", 0),
             "business_profile": s.get("business_profile"),
+            "sustainability_risks": f.get("sustainability_risks", []) or [],
         })
     save_cache(f"premarket_{today}.json", cache_data)
     print(f"\n  ✅ 候选池已缓存 → cache/premarket_{today}.json ({len(cache_data['candidates'])}只)")
@@ -1562,8 +1577,31 @@ def run_intraday(config):
               f"{c.get('intraday_change', 0):+.1f}% "
               f"量比{c.get('volume_ratio', 0):.1f}")
 
-    # 4. 选达标推荐
+    # === 入场风险过滤：与盘前模式同口径（剔除追涨/套牢盘重/量价背离） ===
+    # 盘中模式复用盘前缓存，须与盘前一致的入场风险过滤，避免盘前判死的高风险票被盘中捞回
     filter_cfg = config.get("filter", {})
+    try:
+        risk_inputs = []
+        for c in updated:
+            sig = c.get("signals", {}) or {}
+            risk_inputs.append({
+                "code": c["code"],
+                "name": c["name"],
+                "factors": {
+                    "next_day_prediction": {
+                        "gap_open_probability": sig.get("gap_open_probability", 0),
+                        "reasons": sig.get("gap_reasons", []),
+                    },
+                    "sustainability_risks": c.get("sustainability_risks", []) or [],
+                },
+            })
+        kept = _filter_high_risk_entries(risk_inputs, filter_cfg)
+        kept_codes = {x["code"] for x in kept}
+        updated = [c for c in updated if c["code"] in kept_codes]
+    except Exception as e:
+        logger.warning("盘中入场风险过滤失败(不影响主流程): %s", e)
+
+    # 4. 选达标推荐
     min_score = filter_cfg.get("min_score", 55)
     max_rec = filter_cfg.get("max_recommend", 2)
     qualified = [c for c in updated if c["intraday_score"] >= min_score]
@@ -1597,7 +1635,7 @@ def run_intraday(config):
                 "volume_price_up": sig.get("volume_price_up", 0),
                 "breakout_20d_high": sig.get("breakout_20d_high", 0),
                 "news_score": c.get("news_score", 50),
-                "next_day_prediction": sig.get("next_day_prediction", "neutral"),
+                "next_day_prediction": sig.get("next_day", sig.get("next_day_prediction", "neutral")),
                 "oversold_rebound_detected": sig.get("oversold_rebound_detected", False),
                 "quant_risk": sig.get("quant_risk", "low"),
                 "quant_detected": sig.get("quant_detected", False),
@@ -1791,9 +1829,16 @@ def run_afternoon(config):
             afternoon_score += 3
 
         # 5g. 信号验证：盘前预测 vs 实际走势
-        if signals.get("next_day_prediction") == "up" and change_pct > 0:
+        # 修复：signals.next_day_prediction 缓存的是 str(dict)，原 == "up" 恒不成立，
+        #      改为从 next_day dict 读取 bias 判断盘前看多/看空倾向
+        nd = signals.get("next_day")
+        if not isinstance(nd, dict):
+            raw = signals.get("next_day_prediction")
+            nd = raw if isinstance(raw, dict) else {}
+        bias = nd.get("bias", "neutral")
+        if bias in ("bullish", "slightly_bullish") and change_pct > 0:
             afternoon_score += 2
-        if signals.get("next_day_prediction") == "up" and change_pct < -2:
+        if bias in ("bullish", "slightly_bullish") and change_pct < -2:
             afternoon_score -= 3
 
         updated.append({
@@ -1838,6 +1883,33 @@ def run_afternoon(config):
               f"量比{c['volume_ratio']:.1f} "
               f"净流入{c['net_inflow']:.0f}万")
 
+    # === 入场风险过滤：与盘前模式同口径（剔除追涨/套牢盘重/量价背离） ===
+    # 盘前模式已剔除的追涨/套牢盘票，午后不能又捞回来
+    # （2026-08-14 案例：紫光股份"今日大涨追涨"、智度股份"套牢盘很重"被盘前剔除，
+    #  但午后模式此前不做该过滤，导致这两只高风险票被重新推荐）
+    try:
+        cand_by_code = {cc["code"]: cc for cc in candidates}
+        risk_inputs = []
+        for c in updated:
+            src = cand_by_code.get(c["code"], {})
+            sig = src.get("signals", {}) or {}
+            risk_inputs.append({
+                "code": c["code"],
+                "name": c["name"],
+                "factors": {
+                    "next_day_prediction": {
+                        "gap_open_probability": sig.get("gap_open_probability", 0),
+                        "reasons": sig.get("gap_reasons", []),
+                    },
+                    "sustainability_risks": src.get("sustainability_risks", []) or [],
+                },
+            })
+        kept = _filter_high_risk_entries(risk_inputs, filter_cfg)
+        kept_codes = {x["code"] for x in kept}
+        updated = [c for c in updated if c["code"] in kept_codes]
+    except Exception as e:
+        logger.warning("午后入场风险过滤失败(不影响主流程): %s", e)
+
     # 生成推荐
     min_score = filter_cfg.get("min_score", 50)
     max_rec = filter_cfg.get("max_recommend", 2)
@@ -1868,6 +1940,10 @@ def run_afternoon(config):
 
     recommendations = []
     for c in final:
+        # 合并盘前缓存中的信号字段，保证报告能提炼"为什么选它"和关键因子
+        # （此前只传 6 个盘中字段，导致报告丢失 MACD/均线/量价/次日预判等推荐原因）
+        src = cand_by_code.get(c["code"], {})
+        sig = src.get("signals", {}) or {}
         recommendations.append({
             "code": c["code"],
             "name": c["name"],
@@ -1875,6 +1951,19 @@ def run_afternoon(config):
             "score": c["afternoon_score"],
             "business_profile": bp_by_code.get(c["code"]),
             "factors": {
+                "strategies_triggered": sig.get("strategies", []),
+                "strategy_count": sig.get("strategy_count", 0),
+                "macd_golden_cross": sig.get("macd_golden_cross", 0),
+                "ma_bullish": sig.get("ma_bullish", 0),
+                "volume_price_up": sig.get("volume_price_up", 0),
+                "breakout_20d_high": sig.get("breakout_20d_high", 0),
+                "next_day_prediction": sig.get("next_day", sig.get("next_day_prediction", "neutral")),
+                "oversold_rebound_detected": sig.get("oversold_rebound_detected", False),
+                "quant_risk": sig.get("quant_risk", "low"),
+                "quant_detected": sig.get("quant_detected", False),
+                "sustainability_score": sig.get("sustainability_score", 50),
+                "profit_taking_detected": sig.get("profit_taking_detected", False),
+                "hot_concepts": sig.get("hot_concepts", ""),
                 "premarket_score": c["premarket_score"],
                 "afternoon_change": c["change_pct"],
                 "volume_ratio": c["volume_ratio"],
