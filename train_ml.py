@@ -15,8 +15,7 @@ import sys
 import sqlite3
 import json
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -105,7 +104,7 @@ def collect_training_data():
     # 提取日期列表用于时序验证（已按日期升序）
     dates = [r.get("date", "") for r in all_records]
     result = ml.train(df, dates=dates)
-    logger.info(f'\n训练结果:')
+    logger.info('\n训练结果:')
     logger.info(f"  模型类型: {result.get('model_type', 'unknown')}")
     logger.info(f"  验证方式: {result.get('validation', 'random_split')}")
     logger.info(f"  准确率: {result['accuracy']:.1%}")
@@ -114,7 +113,7 @@ def collect_training_data():
     logger.info(f"  F1分数: {result['f1_score']:.3f}")
     logger.info(f"  训练样本: {result['train_samples']}")
     logger.info(f"  测试样本: {result['test_samples']}")
-    logger.info(f'\nTop10重要特征:')
+    logger.info('\nTop10重要特征:')
     for name, imp in result["top_features"]:
         logger.info(f'  {name}: {imp:.1%}')
 

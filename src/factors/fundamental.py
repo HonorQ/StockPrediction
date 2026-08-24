@@ -2,8 +2,6 @@
 基本面因子
 估值指标、盈利能力、成长能力、资本结构
 """
-import pandas as pd
-import numpy as np
 from typing import Dict
 
 

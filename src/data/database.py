@@ -3,6 +3,7 @@ SQLite数据库 - 历史因子截面 + 推荐追踪 + 回测记录
 """
 import sqlite3
 import json
+from contextlib import contextmanager
 import os
 import pandas as pd
 from datetime import datetime, timedelta
@@ -44,23 +45,39 @@ class StockDatabase:
         self._init_db()
         self._migrate_schema()
 
-    @staticmethod
-    def _execute_with_retry(conn, sql, params=None, max_retries=3):
-        """带重试的 SQL 执行，解决 SQLite 并发写锁问题"""
+    @contextmanager
+    def _connection(self):
+        """连接上下文管理器：事务提交/回滚 + 显式关闭连接。
+
+        Python sqlite3 的 `with conn:` 只管理事务、不关闭连接，原先每个方法
+        裸用导致大量短命连接依赖 GC 回收。commit 遇到并发写锁
+        (OperationalError: database is locked) 时按指数退避重试。
+        """
         import time
-        for attempt in range(max_retries):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            for attempt in range(3):
+                try:
+                    conn.commit()
+                    break
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e) and attempt < 2:
+                        time.sleep(0.1 * (2 ** attempt))
+                        continue
+                    raise
+        except Exception:
             try:
-                if params is not None:
-                    return conn.execute(sql, params)
-                return conn.execute(sql)
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e) and attempt < max_retries - 1:
-                    time.sleep(0.1 * (2 ** attempt))
-                    continue
-                raise
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
 
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA synchronous=NORMAL")
@@ -166,10 +183,17 @@ class StockDatabase:
                     score REAL,
                     actual_return REAL,
                     is_failure INTEGER DEFAULT 0,
+                    return_horizon INTEGER,
                     factor_results TEXT,
                     created_at TEXT DEFAULT (datetime('now'))
                 )
             """)
+            # 旧库迁移：补 return_horizon 列(记录归因所用收益窗口, d14/d10/d5/d3/d1)
+            try:
+                conn.execute(
+                    "ALTER TABLE factor_attribution ADD COLUMN return_horizon INTEGER")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_attr_date ON factor_attribution(trade_date)
             """)
@@ -193,6 +217,25 @@ class StockDatabase:
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_ic_factor ON ic_history(factor_name)
+            """)
+
+            # 日K线落库：ML_TRAINING_PLAN 关键缺口#5——原始K线此前不落库，
+            # 导致无法离线做需要重算因子的全市场回测。盘前预取后幂等写入。
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS kline_daily (
+                    code TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    amount REAL,
+                    PRIMARY KEY (code, trade_date)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_kline_date ON kline_daily(trade_date)
             """)
 
             conn.execute("""
@@ -321,7 +364,7 @@ class StockDatabase:
         旧数据不回填（保持 sub_scores JSON 可读），新写入同时落独立列 + JSON。
         同时为 recommendations 表添加 d14_return 列（T+14 反馈训练主信号）。
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(factor_snapshots)").fetchall()}
 
             # 添加 18 个 sub_* 列
@@ -350,11 +393,13 @@ class StockDatabase:
                             score: float, price: float, rank: int = 1,
                             mode: str = "premarket", factors: dict = None,
                             regime: str = None):
-        with sqlite3.connect(self.db_path) as conn:
-            # 去重：同一天同一股票只保留最新一条（盘前→盘中→午后会多次写入）
+        with self._connection() as conn:
+            # 去重键为 (trade_date, code, mode)：同一股票同日允许盘前/午后各留一条，
+            # 这样才能分别回填收益、对比"盘前推荐 vs 午后推荐"的历史准确率。
+            # (旧逻辑按 (trade_date, code) 去重导致午后覆盖盘前记录，两者永远无法对比)
             existing = conn.execute(
-                "SELECT id FROM recommendations WHERE trade_date=? AND code=?",
-                (trade_date, code)
+                "SELECT id FROM recommendations WHERE trade_date=? AND code=? AND mode=?",
+                (trade_date, code, mode)
             ).fetchone()
 
             if existing:
@@ -365,11 +410,11 @@ class StockDatabase:
                     ).fetchone()[0]
                 conn.execute(
                     """UPDATE recommendations
-                       SET name=?, score=?, current_price=?, rank=?, mode=?, factors=?, regime=?
-                       WHERE trade_date=? AND code=?""",
-                    (name, score, price, rank, mode,
+                       SET name=?, score=?, current_price=?, rank=?, factors=?, regime=?
+                       WHERE trade_date=? AND code=? AND mode=?""",
+                    (name, score, price, rank,
                      json.dumps(factors, ensure_ascii=False, cls=_NumpyEncoder) if factors else None,
-                     regime, trade_date, code)
+                     regime, trade_date, code, mode)
                 )
             else:
                 conn.execute(
@@ -384,7 +429,10 @@ class StockDatabase:
     def update_performance(self, trade_date: str, code: str,
                            d1: float = None, d3: float = None,
                            d5: float = None, d10: float = None,
-                           d14: float = None):
+                           d14: float = None, mode: str = None):
+        """回填 T+N 收益。
+        mode 提供时精确更新该 mode 的行(盘前/午后入场价不同，收益必须分开算)；
+        None 时保持旧行为(不限 mode，同日同码多行会被写成相同值——仅兼容旧调用)。"""
         updates = []
         params = []
         for k, v in [("d1_return", d1), ("d3_return", d3),
@@ -395,15 +443,19 @@ class StockDatabase:
                 params.append(v)
         if not updates:
             return
+        where = "trade_date=? AND code=?"
         params.extend([trade_date, code])
-        with sqlite3.connect(self.db_path) as conn:
+        if mode:
+            where += " AND mode=?"
+            params.append(mode)
+        with self._connection() as conn:
             conn.execute(
-                f"UPDATE recommendations SET {', '.join(updates)} WHERE trade_date=? AND code=?",
+                f"UPDATE recommendations SET {', '.join(updates)} WHERE {where}",
                 params
             )
 
     def get_recent_recommendations(self, days: int = 30) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             rows = conn.execute(
@@ -413,7 +465,7 @@ class StockDatabase:
         return [dict(r) for r in rows]
 
     def get_recommendation_history(self, code: str, days: int = 60) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             rows = conn.execute(
@@ -434,7 +486,7 @@ class StockDatabase:
             json.dumps(factors, ensure_ascii=False, cls=_NumpyEncoder) if factors else None,
         ] + list(sub_cols.values())
         sql = f"INSERT INTO factor_snapshots ({', '.join(col_names)}) VALUES ({placeholders})"
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.execute(sql, values)
 
     def save_factor_snapshots_batch(self, items: list):
@@ -457,7 +509,7 @@ class StockDatabase:
         full_cols = col_names + sorted(sub_cols)
         placeholders = ", ".join(["?"] * len(full_cols))
         sql = f"INSERT INTO factor_snapshots ({', '.join(full_cols)}) VALUES ({placeholders})"
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.executemany(sql, values_list)
 
     def get_factor_snapshot_by_code_date(self, trade_date: str,
@@ -465,7 +517,7 @@ class StockDatabase:
         """精确查询某只股票某天的因子快照，返回解析后的 sub_scores dict。
         用于反馈训练归因（避免 query_factor_snapshots 的 limit/排序导致漏查）。
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """SELECT * FROM factor_snapshots
@@ -492,8 +544,33 @@ class StockDatabase:
                     sub[dim] = v
         return sub
 
+    def get_factor_snapshot_raw_factors(self, code: str, trade_date: str) -> Optional[Dict]:
+        """获取某只股票某天的原始因子字典（factors JSON字段）。
+        用于 ML 训练时获取原始因子特征，而非24维子评分。
+        """
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT factors FROM factor_snapshots
+                   WHERE trade_date=? AND code=?
+                   ORDER BY id DESC LIMIT 1""",
+                (trade_date, code)
+            ).fetchall()
+        if not rows:
+            return None
+        r = dict(rows[0])
+        factors = r.get("factors")
+        if isinstance(factors, str):
+            try:
+                factors = json.loads(factors)
+            except Exception:
+                return None
+        if isinstance(factors, dict) and "z_scores" not in factors:
+            return factors
+        return None
+
     def get_factor_history(self, days: int = 365) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             rows = conn.execute(
@@ -547,7 +624,7 @@ class StockDatabase:
         if limit:
             sql += " LIMIT ?"
             params.append(limit)
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
@@ -579,11 +656,13 @@ class StockDatabase:
             " FROM factor_snapshots fs"
             " INNER JOIN recommendations r"
             "   ON fs.trade_date = r.trade_date AND fs.code = r.code"
-            " WHERE fs.trade_date >= ? AND fs.trade_date <= ?"
+            # 因子快照产自盘前全量计算，只 JOIN 盘前推荐行：
+            # 1) 语义一致；2) 同码同日存在 premarket/afternoon 两行时防止面板样本重复
+            " WHERE fs.trade_date >= ? AND fs.trade_date <= ? AND r.mode='premarket'"
             f" AND r.{return_col} IS NOT NULL"
             " ORDER BY fs.trade_date"
         )
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(sql, (cutoff, today)).fetchall()
         result = []
@@ -594,7 +673,7 @@ class StockDatabase:
         return result
 
     def get_trade_dates_with_data(self, days: int = 60) -> List[str]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             rows = conn.execute(
                 """SELECT DISTINCT trade_date FROM factor_snapshots
@@ -603,7 +682,7 @@ class StockDatabase:
         return [r[0] for r in rows]
 
     def save_backtest_result(self, metrics: dict):
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """INSERT INTO backtest_results
                    (run_date, total_return, annual_return, sharpe_ratio,
@@ -630,7 +709,7 @@ class StockDatabase:
             )
 
     def get_backtest_history(self, limit: int = 20) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM backtest_results ORDER BY run_date DESC LIMIT ?",
@@ -652,7 +731,7 @@ class StockDatabase:
         同一天重跑 premarket 会重复开仓+平仓，污染胜率统计。
         返回新记录 id（已存在时返回旧记录 id）。
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             existing = conn.execute(
                 "SELECT id FROM paper_trades WHERE trade_date=? AND code=?",
                 (trade_date, code)
@@ -677,7 +756,7 @@ class StockDatabase:
         """平仓：填入出场信息并计算收益。
         exit_reason: take_profit / stop_loss / hold_expire / manual
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT entry_price, position_pct, shares FROM paper_trades WHERE id=? AND status='open'",
@@ -727,7 +806,7 @@ class StockDatabase:
                                      max_drawdown_pct: float = None,
                                      max_profit_pct: float = None) -> None:
         """更新未平仓交易的极值（仅在更差/更好时覆盖）"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             if max_drawdown_pct is not None:
                 conn.execute(
                     """UPDATE paper_trades SET max_drawdown_pct=?
@@ -743,14 +822,14 @@ class StockDatabase:
 
     def update_trade_config(self, trade_id: int, config: dict) -> None:
         """更新 paper_trade 的 trade_config JSON（如 trailing stop 状态）"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.execute(
                 "UPDATE paper_trades SET trade_config=? WHERE id=?",
                 (json.dumps(config, ensure_ascii=False), trade_id)
             )
 
     def get_open_paper_trades(self) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM paper_trades WHERE status='open' ORDER BY trade_date DESC"
@@ -759,7 +838,7 @@ class StockDatabase:
 
     def has_open_position(self, code: str) -> bool:
         """检查某个股票是否已有未平仓的 paper_trade（避免重复建仓）"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 "SELECT 1 FROM paper_trades WHERE code=? AND status='open' LIMIT 1",
                 (code,)
@@ -767,7 +846,7 @@ class StockDatabase:
         return row is not None
 
     def get_closed_paper_trades(self, days: int = 30) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             rows = conn.execute(
@@ -780,7 +859,7 @@ class StockDatabase:
 
     def get_paper_trade_stats(self, days: int = 30) -> Dict:
         """统计最近 N 天已平仓交易的整体表现"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             rows = conn.execute(
                 """SELECT return_pct, pnl, exit_reason, holding_days
@@ -814,22 +893,84 @@ class StockDatabase:
     # ==================================================================
     # 反馈机制：归因记录
     # ==================================================================
+    # ==================================================================
+    # 日K线落库（离线回测数据基建）
+    # ==================================================================
+    _KLINE_COL_MAP = {
+        "日期": "trade_date", "date": "trade_date",
+        "开盘": "open", "open": "open",
+        "最高": "high", "high": "high",
+        "最低": "low", "low": "low",
+        "收盘": "close", "close": "close",
+        "成交量": "volume", "volume": "volume",
+        "成交额": "amount", "amount": "amount",
+    }
+
+    def save_klines(self, code: str, df) -> int:
+        """批量幂等写入日K线。df 列名兼容中文(akshare)/英文两种风格。
+        返回写入行数；缺少日期/收盘列时返回0。"""
+        if df is None or df.empty:
+            return 0
+        rename = {c: self._KLINE_COL_MAP[c] for c in df.columns if c in self._KLINE_COL_MAP}
+        std = df.rename(columns=rename)
+        for col in ("trade_date", "close"):
+            if col not in std.columns:
+                return 0
+        rows = []
+        for _, r in std.iterrows():
+            try:
+                d = str(r["trade_date"])[:10]
+                close_v = float(r.get("close") or 0)
+                if not d or close_v <= 0:
+                    continue
+                rows.append((
+                    code, d,
+                    float(r.get("open") or 0), float(r.get("high") or 0),
+                    float(r.get("low") or 0), close_v,
+                    float(r.get("volume") or 0), float(r.get("amount") or 0),
+                ))
+            except (TypeError, ValueError):
+                continue
+        if not rows:
+            return 0
+        with self._connection() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO kline_daily
+                   (code, trade_date, open, high, low, close, volume, amount)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+        return len(rows)
+
+    def get_klines(self, code: str, days: int = 250):
+        """读取个股日K线(按日期升序)，返回标准英文列 DataFrame 或空表"""
+        import pandas as pd
+        with self._connection() as conn:
+            df = pd.read_sql_query(
+                """SELECT trade_date AS date, open, high, low, close, volume, amount
+                   FROM kline_daily WHERE code=? ORDER BY trade_date DESC LIMIT ?""",
+                conn, params=(code, days),
+            )
+        return df.iloc[::-1].reset_index(drop=True)
+
     def save_attribution(self, trade_date: str, code: str, name: str,
                          score: float, actual_return: float,
-                         factor_results: dict, is_failure: bool = False):
-        with sqlite3.connect(self.db_path) as conn:
+                         factor_results: dict, is_failure: bool = False,
+                         return_horizon: int = None):
+        with self._connection() as conn:
             conn.execute(
                 """INSERT INTO factor_attribution
-                   (trade_date, code, name, score, actual_return, is_failure, factor_results)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (trade_date, code, name, score, actual_return, is_failure,
+                    return_horizon, factor_results)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (trade_date, code, name, score, round(actual_return, 2),
-                 int(is_failure),
+                 int(is_failure), return_horizon,
                  json.dumps(factor_results, ensure_ascii=False, cls=_NumpyEncoder))
             )
 
     def get_attribution_history(self, days: int = 365,
                                 only_failures: bool = False) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             sql = "SELECT * FROM factor_attribution WHERE trade_date >= ?"
@@ -884,7 +1025,7 @@ class StockDatabase:
     # ==================================================================
     def save_ic_record(self, trade_date: str, ic_values: Dict[str, float],
                        window_days: int = 0, sample_count: int = 0):
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             for factor, ic in ic_values.items():
                 conn.execute(
                     """INSERT INTO ic_history
@@ -894,7 +1035,7 @@ class StockDatabase:
                 )
 
     def get_ic_history(self, factor_name: str = None, days: int = 60) -> pd.DataFrame:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             if factor_name:
                 cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
                 rows = conn.execute(
@@ -926,7 +1067,7 @@ class StockDatabase:
     # ==================================================================
     def save_weight_update(self, trade_date: str, factor_name: str,
                            old_weight: float, new_weight: float, reason: str = ""):
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """INSERT INTO weight_history
                    (trade_date, factor_name, old_weight, new_weight, reason)
@@ -935,7 +1076,7 @@ class StockDatabase:
             )
 
     def get_weight_history(self, days: int = 90) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             rows = conn.execute(
@@ -957,7 +1098,7 @@ class StockDatabase:
         Returns:
             {factor_name: new_weight}，只返回有调权记录的因子。
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             if today is None:
                 today = datetime.now().strftime("%Y-%m-%d")
@@ -979,7 +1120,7 @@ class StockDatabase:
     def save_model_version(self, version: str, trained_at: str,
                            model_type: str, metrics: dict,
                            top_features: list, model_path: str):
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """INSERT INTO model_versions
                    (version, trained_at, model_type, accuracy, precision,
@@ -995,7 +1136,7 @@ class StockDatabase:
             )
 
     def get_latest_model_version(self) -> Dict:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT * FROM model_versions ORDER BY id DESC LIMIT 1"
@@ -1008,7 +1149,7 @@ class StockDatabase:
         return d
 
     def get_model_history(self, limit: int = 10) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM model_versions ORDER BY id DESC LIMIT ?", (limit,)
@@ -1027,7 +1168,7 @@ class StockDatabase:
 
     def get_sector_weights(self, industry_name: str) -> Dict[str, float]:
         """返回该行业的 {factor_name: weight} 字典。"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT factor_name, weight FROM sector_factor_weights WHERE industry_name=?",
@@ -1039,7 +1180,7 @@ class StockDatabase:
 
     def get_all_sector_weights(self) -> Dict[str, Dict[str, float]]:
         """批量加载所有行业的权重，返回 {industry_name: {factor: weight}}"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT industry_name, factor_name, weight FROM sector_factor_weights"
@@ -1054,7 +1195,7 @@ class StockDatabase:
                              accuracy: float, trade_date: str,
                              old_weight: float = None, reason: str = ""):
         """UPSERT 行业因子权重 + 写入变更历史。"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """INSERT INTO sector_factor_weights
                    (industry_name, factor_name, weight, samples, accuracy, last_updated)
@@ -1082,7 +1223,7 @@ class StockDatabase:
 
     def save_shadow_ml_scores(self, trade_date: str, scores: List[Dict]):
         """批量写入影子 ML 评分（每日覆盖写入）。"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.execute("DELETE FROM ml_shadow_scores WHERE trade_date=?", (trade_date,))
             for s in scores:
                 conn.execute(
@@ -1099,7 +1240,7 @@ class StockDatabase:
 
     def get_shadow_ml_scores(self, trade_date: str) -> List[Dict]:
         """获取某天的影子 ML 评分数据。"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM ml_shadow_scores WHERE trade_date=? ORDER BY ml_rank",
@@ -1110,7 +1251,7 @@ class StockDatabase:
     def get_shadow_ml_history(self, days: int = 30) -> List[Dict]:
         """获取最近 N 天的影子 ML 评分历史。"""
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM ml_shadow_scores WHERE trade_date >= ? ORDER BY trade_date, ml_rank",
@@ -1125,7 +1266,7 @@ class StockDatabase:
         """返回该股票的 {factor_name: weight} 字典。
         若该股票没有任何记录，返回空 dict（调用方应 fallback 到全局权重）。
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT factor_name, weight FROM stock_factor_weights WHERE code=?",
@@ -1137,7 +1278,7 @@ class StockDatabase:
 
     def get_stock_weight_stats(self, code: str) -> Dict[str, Dict]:
         """返回该股票每个因子的完整统计 {factor: {weight, samples, accuracy}}"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """SELECT factor_name, weight, samples, accuracy
@@ -1157,7 +1298,7 @@ class StockDatabase:
         """批量加载所有股票的权重，返回 {code: {factor: weight}}。
         回测主循环用，避免 N+1 查询。
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT code, factor_name, weight FROM stock_factor_weights"
@@ -1174,7 +1315,7 @@ class StockDatabase:
         """UPSERT 个股因子权重 + 写入变更历史。
         old_weight 若提供且不等于 new_weight，则写入 stock_weight_history。
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """INSERT INTO stock_factor_weights
                    (code, factor_name, weight, samples, accuracy, last_updated)
@@ -1198,7 +1339,7 @@ class StockDatabase:
 
     def get_stock_weight_history(self, code: str, days: int = 90) -> List[Dict]:
         """获取该股票的权重变更历史"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             rows = conn.execute(
@@ -1212,7 +1353,7 @@ class StockDatabase:
     def get_recent_attribution_for_stock(self, code: str,
                                           days: int = 60) -> List[Dict]:
         """获取该股票最近 N 天的归因记录（供 StockWeightManager 调权用）"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             rows = conn.execute(

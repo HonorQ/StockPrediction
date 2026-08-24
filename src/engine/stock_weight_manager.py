@@ -28,7 +28,6 @@ from src.data.market_data import MarketDataFetcher
 
 
 MIN_SAMPLES = 5           # 单股单因子最少归因样本数才调权（低于此阈值统计噪声过大，与正向强化门槛一致）
-MAX_WEIGHT_CHANGE = 0.05  # 单次调整保留小数位数（同时作为变化阈值）
 
 # 24 维因子完整列表（与 StockScorer.get_sub_scores 一致）
 ALL_FACTORS = [

@@ -2,6 +2,18 @@ filter:
   max_recommend: 2
   min_score: 53
   min_strong_signals: 1
+  quick_score:
+    top_n_default: 30
+    top_n_bull: 50
+    top_n_defensive: 20
+    change_weight: 3
+    change_cap: 20
+    turnover2_bonus: 10
+    turnover5_bonus: 5
+    volume_ratio_bonus: 10
+    hot_bonus: 15
+    mv_sweet_bonus: 5
+    news_bonus_cap: 10
   entry_risk:
     max_gap_open_prob: 70
     block_high_chip: true
@@ -101,31 +113,70 @@ technical:
   rsi_period: 6
 trade:
   max_hold_days: 3
-  stop_loss_pct: -0.05
-  take_profit_pct: 0.08
-  max_stop_loss_pct: -0.08
+  stop_loss_pct: -0.02
+  take_profit_pct: 0.1
+  max_stop_loss_pct: -0.04
+  volatility_adaptive: true
+  volatility_factor: 1.5
+regime:
+  enabled: true
+  empty_on_bear: true
+  bear_score_threshold: 35
+  weights:
+    bull:
+      trend: 0.05
+      strategy: 0.08
+      news: 0.08
+      policy_event: 0.08
+      leader: 0.06
+      relative_strength: 0.02
+    neutral:
+      trend: 0.01
+      strategy: 0.05
+      news: 0.06
+      policy_event: 0.07
+      leader: 0.05
+      relative_strength: 0.01
+    bear:
+      trend: 0.001
+      strategy: 0.03
+      news: 0.04
+      policy_event: 0.05
+      leader: 0.03
+      relative_strength: 0.005
+      volatility: 0.08
+      moat: 0.06
+    crash:
+      trend: 0.001
+      strategy: 0.01
+      news: 0.02
+      policy_event: 0.03
+      leader: 0.01
+      volatility: 0.1
+      moat: 0.08
+      national_team: 0.06
 weights:
-  ashare_specific: 0.01
-  capital_behavior: 0.0915
-  chip: 0.0274
-  circulate_holder: 0.0274
-  deep_research: 0.01
-  dragon_tiger: 0.0537
-  fundamental: 0.0566
-  holder_concentration: 0.0456
-  institutional: 0.0566
-  leader: 0.0537
-  lockup_risk: 0.0366
-  margin_trading: 0.0537
-  moat: 0.0366
-  national_team: 0.0366
-  news: 0.064
-  oversold_rebound: 0.01
-  policy_event: 0.0732
-  quant_behavior: 0.01
-  relative_strength: 0.009
-  research: 0.0537
-  sector_rotation: 0.0566
-  shareholder: 0.0366
-  strategy: 0.01
-  trend: 0.01
+  ashare_specific: 0.0102
+  capital_behavior: 0.0932
+  chip: 0.0279
+  circulate_holder: 0.0279
+  deep_research: 0.0509
+  dragon_tiger: 0.0547
+  fundamental: 0.0576
+  holder_concentration: 0.0464
+  institutional: 0.0576
+  leader: 0.0547
+  lockup_risk: 0.0373
+  margin_trading: 0.0547
+  moat: 0.0373
+  national_team: 0.0373
+  news: 0.0652
+  oversold_rebound: 0.001
+  policy_event: 0.0745
+  quant_behavior: 0.001
+  relative_strength: 0.0092
+  research: 0.0547
+  sector_rotation: 0.0576
+  shareholder: 0.0373
+  strategy: 0.0509
+  trend: 0.0009

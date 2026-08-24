@@ -3,7 +3,6 @@
 个股相对于大盘、板块的强弱表现
 """
 import pandas as pd
-import numpy as np
 from typing import Dict
 
 

@@ -3,9 +3,9 @@
 识别"买预期卖事实"、利好落地反跌、获利盘出逃
 """
 import pandas as pd
-import numpy as np
 from typing import Dict, List
-from datetime import datetime, timedelta
+
+from src.utils.helpers import get_limit_pct
 
 
 class ExpectationPricing:
@@ -309,7 +309,7 @@ class ProfitTakingDetector:
     def __init__(self):
         pass
 
-    def detect(self, df: pd.DataFrame) -> Dict:
+    def detect(self, df: pd.DataFrame, code: str = "", name: str = "") -> Dict:
         """
         检测获利盘出逃信号
         """
@@ -360,11 +360,12 @@ class ProfitTakingDetector:
                     intensity += 20
 
         # ============================================================
-        # 3. 涨停板被砸开
+        # 3. 涨停板被砸开（按板块口径：接近涨停但未封住）
         # ============================================================
         if not change_pct.empty:
             today_change = change_pct.iloc[-1]
-            if 8 < today_change < 9.8:  # 曾涨停但没封住
+            limit_pct = get_limit_pct(code, name)
+            if limit_pct - 2 < today_change < limit_pct - 0.2:
                 signals.append("涨停板被砸开（抛压重）")
                 intensity += 25
 

@@ -1,0 +1,15 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = ["backups", "cache", "logs", "models", "reports", "data"]
+
+[tool.ruff.lint]
+# 只拦截确定性错误，不强制风格统一（存量代码风格迁移成本高）：
+# E9 语法/缩进错误(曾导致成交额过滤失效)、F8xx 未定义变量/未使用导入、W605 无效转义
+# F841(未使用局部变量)多为因子字段解包残留，暂不强制清理
+select = ["E9", "F", "W6"]
+ignore = ["F841"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -9,11 +9,11 @@ import os
 import sys
 import json
 import yaml
-import time as _time
 import argparse
 import logging
 import pandas as pd
 from datetime import datetime, timedelta
+from typing import Dict
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -546,6 +546,10 @@ def _validate_weights_consistency(config: dict) -> None:
     cfg_keys = set(cfg_weights.keys())
 
     problems = []
+    # 0) 权重和必须为 1（否则评分尺度漂移，entry_score/min_score 实际含义失真）
+    total = sum(float(v) for v in cfg_weights.values())
+    if abs(total - 1.0) > 0.02:
+        problems.append(f"config.weights 总和={total:.4f}，偏离 1.0 超过容差(±0.02)")
     # 1) config 权重必须覆盖全部子评分维度（否则该维度被静默丢弃）
     missing = sub_keys - cfg_keys
     if missing:
@@ -801,6 +805,49 @@ def run_premarket(config):
     print("\n[5.1] 分析板块轮动...")
     rotation_data = sector_rotation.analyze_sector_rotation(hot_df, news_list)
 
+    # 5.2 大盘择时预评估 + regime 权重切换
+    # 必须在 batch_normalize 之前完成：bear/crash 切防守权重、bull 切进攻权重，
+    # 使本轮 Z-Score 截面评分直接使用切换后的权重。
+    # (此前评估在评分之后才执行，config.yaml 的 regime.weights 从未生效)
+    regime_filter = None
+    regime_result = None
+    _regime_info = None
+    regime = "neutral"
+    try:
+        from src.engine.market_regime import MarketRegimeFilter
+        regime_filter = MarketRegimeFilter(market_fetcher=market_fetcher)
+        # 北向资金维度此前从未接入(一直传 None)，现从数据层获取；
+        # 接口失败时返回中性默认值(net_inflow=0)，不影响择时其余维度
+        try:
+            northbound_data = market_fetcher.get_north_flow()
+        except Exception as nb_err:
+            logger.warning("获取北向资金失败，择时忽略北向维度: %s", nb_err)
+            northbound_data = None
+        regime_result = regime_filter.assess_regime(
+            market_overview=index_data,
+            sentiment=sentiment,
+            northbound_data=northbound_data,
+            global_markets=global_markets,
+        )
+        _regime_info = regime_result
+        regime = regime_result["regime"]
+        print(f"\n[5.2] 大盘择时预评估: {regime} | 得分 {regime_result['score']}/100")
+        for r in regime_result["reasons"][:3]:
+            print(f"      • {r}")
+        # 在动态调权结果(weight_history 合并后)之上做 regime 部分覆盖，
+        # 仅覆盖 24 维评分体系中存在的因子(无效维度由 get_regime_weights 跳过并告警)
+        regime_weights = regime_filter.get_regime_weights(regime, weights)
+        switched = {
+            k: v for k, v in regime_weights.items()
+            if abs(v - float(weights.get(k, 0))) > 1e-9
+        }
+        weights = regime_weights
+        if switched:
+            print("  ⚖️ 已应用 %s 因子权重: %s" % (
+                regime, ", ".join(f"{k}={v}" for k, v in sorted(switched.items()))))
+    except Exception as e:
+        logger.warning("大盘择时预评估失败，沿用默认权重: %s", e)
+
     # 6. 筛选 + 深度计算
     print("\n[6/6] 筛选股票并计算因子...")
     print("  --- 第一层: 硬性条件筛选 ---")
@@ -817,7 +864,26 @@ def run_premarket(config):
         print(f"  📋 未排除任何板块: {len(candidates_df)} 只")
 
     # 阶段1: 快速预评分
+    # 权重参数从 config.yaml 的 filter.quick_score 读取，默认值与历史硬编码一致；
+    # 候选数量按 regime 动态调整：bull 放宽进入深度分析的票数，bear/crash 收紧省时
     print("  --- 阶段1: 实时行情快速预评分 ---")
+    qs_cfg = filter_cfg.get("quick_score", {}) or {}
+    QS_CHANGE_W = float(qs_cfg.get("change_weight", 3))
+    QS_CHANGE_CAP = float(qs_cfg.get("change_cap", 20))
+    QS_TURNOVER2 = float(qs_cfg.get("turnover2_bonus", 10))
+    QS_TURNOVER5 = float(qs_cfg.get("turnover5_bonus", 5))
+    QS_VOLUME_RATIO = float(qs_cfg.get("volume_ratio_bonus", 10))
+    QS_HOT = float(qs_cfg.get("hot_bonus", 15))
+    QS_MV_SWEET = float(qs_cfg.get("mv_sweet_bonus", 5))
+    QS_NEWS_CAP = float(qs_cfg.get("news_bonus_cap", 10))
+
+    if regime == "bull":
+        top_n = int(qs_cfg.get("top_n_bull", 50))
+    elif regime in ("bear", "crash"):
+        top_n = int(qs_cfg.get("top_n_defensive", 20))
+    else:
+        top_n = int(qs_cfg.get("top_n_default", 30))
+
     quick_scored = []
     for _, row in candidates_df.iterrows():
         stock_code = str(row["代码"])
@@ -831,31 +897,31 @@ def run_premarket(config):
             continue
         qs = 50
         if change_pct > 0:
-            qs += min(change_pct * 3, 20)
+            qs += min(change_pct * QS_CHANGE_W, QS_CHANGE_CAP)
         if turnover > 2:
-            qs += 10
+            qs += QS_TURNOVER2
         if turnover > 5:
-            qs += 5
+            qs += QS_TURNOVER5
         if volume_ratio > 1.5:
-            qs += 10
+            qs += QS_VOLUME_RATIO
         if stock_code in hot_codes:
-            qs += 15
+            qs += QS_HOT
         mv_yi = total_mv / 1e8 if total_mv else 0
         if 50 < mv_yi < 500:
-            qs += 5
+            qs += QS_MV_SWEET
         ns = news_factor.score_stock_news(stock_code, news_list)
         if ns > 60:
-            qs += min((ns - 50) / 5, 10)
+            qs += min((ns - 50) / 5, QS_NEWS_CAP)
         quick_scored.append({
             "code": stock_code, "name": stock_name,
             "current_price": float(current_price),
             "quick_score": qs, "row": row,
         })
     quick_scored.sort(key=lambda x: x["quick_score"], reverse=True)
-    top_candidates = quick_scored[:30]
+    top_candidates = quick_scored[:top_n]
     # 把北交所(bj)股排后面（baostock不支持，先处理sz/sh）
     top_candidates.sort(key=lambda x: (x["code"].startswith(('bj', 'BJ', '8', '9')), -x["quick_score"]))
-    print(f"  实时预评分完成: {len(candidates_df)} → Top{len(top_candidates)} 进入深度分析")
+    print(f"  实时预评分完成: {len(candidates_df)} → Top{len(top_candidates)} 进入深度分析 (regime={regime})")
 
     # 阶段2: 深度因子计算
     print("  --- 阶段2: 深度因子计算 ---")
@@ -873,6 +939,20 @@ def run_premarket(config):
     ok_count = sum(1 for v in history_cache.values() if v is not None and not v.empty)
     print(f"  ✅ 预取完成: 历史K线 {ok_count}/{len(prefetch_codes)} 只, 耗时 {elapsed_prefetch:.1f}s")
 
+    # K线落库：ML_TRAINING_PLAN 关键缺口#5——为离线全市场重算回测积累数据。
+    # 幂等 upsert，失败不影响主流程
+    try:
+        saved_rows = 0
+        saved_stocks = 0
+        for code_k, h_k in history_cache.items():
+            n = db.save_klines(code_k, h_k)
+            if n > 0:
+                saved_rows += n
+                saved_stocks += 1
+        print(f"  💾 K线落库: {saved_stocks} 只 / {saved_rows} 行")
+    except Exception as e:
+        logger.warning("K线落库失败(不影响主流程): %s", e)
+
     # 获取沪深300历史K线，用于 relative_strength 因子计算相对大盘强弱
     # （此前未传入 market_df 导致 relative_strength_5d/20d 永远缺失，sub_relative_strength 恒为 50）
     market_history = None
@@ -880,6 +960,12 @@ def run_premarket(config):
         market_history = market_fetcher.get_stock_history("sh000300", days=120)
         if market_history is None or market_history.empty or len(market_history) < 20:
             market_history = None
+        else:
+            # 指数K线一并落库，供离线 regime 判定/回测基准使用
+            try:
+                db.save_klines("sh000300", market_history)
+            except Exception:
+                pass
     except Exception as e:
         print(f"  ⚠️ 获取沪深300历史失败，relative_strength 将降级为个股自身强弱: {e}")
         market_history = None
@@ -980,15 +1066,15 @@ def run_premarket(config):
         all_factors["event_pricing_degree"] = event_pricing["pricing_degree"]
         all_factors["event_pricing_signals"] = event_pricing["signals"]
 
-        profit_taking = profit_taking_detector.detect(history)
+        profit_taking = profit_taking_detector.detect(history, code=stock_code, name=stock_name)
         all_factors["profit_taking_detected"] = profit_taking["detected"]
         all_factors["profit_taking_intensity"] = profit_taking["intensity"]
         all_factors["profit_taking_signals"] = profit_taking["signals"]
 
-        ashare = ashare_factors.calculate_all(history, sentiment)
+        ashare = ashare_factors.calculate_all(history, sentiment, code=stock_code, name=stock_name)
         all_factors.update(ashare)
 
-        hot_money = hot_money_tracker.analyze(history)
+        hot_money = hot_money_tracker.analyze(history, code=stock_code, name=stock_name)
         all_factors["hot_money_score"] = hot_money["hot_money_score"]
         all_factors["hot_money_signals"] = hot_money["signals"]
 
@@ -1013,7 +1099,7 @@ def run_premarket(config):
         all_factors["lockup_risk"] = lockup["lockup_risk"]
         all_factors["lockup_score"] = lockup.get("lockup_score", 50)
         all_factors["lockup_signals"] = lockup["lockup_signals"]
-        limit_quality = limit_quality_factor.calculate(history)
+        limit_quality = limit_quality_factor.calculate(history, code=stock_code, name=stock_name)
         all_factors["limit_quality"] = limit_quality["limit_quality"]
         all_factors["limit_signals"] = limit_quality["limit_signals"]
 
@@ -1154,35 +1240,22 @@ def run_premarket(config):
     final.sort(key=lambda x: x["score"], reverse=True)
     max_rec = filter_cfg.get("max_recommend", 2)
 
-    # === 大盘择时层：根据市场状态动态缩减推荐数 ===
+    # === 大盘择时层：缩减推荐数 + bear/crash 空仓（评估与权重切换已在 5.2 完成）===
     try:
-        from src.engine.market_regime import MarketRegimeFilter
-        regime_filter = MarketRegimeFilter(market_fetcher=market_fetcher)
-        regime_result = regime_filter.assess_regime(
-            market_overview=index_data,
-            sentiment=sentiment,
-            northbound_data=None,
-            global_markets=global_markets,
-        )
-        regime = regime_result["regime"]
-        regime_max = regime_result["max_recommend"]
-        final_max_rec = min(max_rec, regime_max) if regime != "bull" else max_rec
-        print(f"  🎯 大盘择时: {regime} | 得分 {regime_result['score']}/100 | "
-              f"推荐上限 {max_rec} → {final_max_rec}")
-        if regime_result["reasons"]:
-            for r in regime_result["reasons"][:3]:
-                print(f"      • {r}")
-        # crash/bear 模式严格执行：清空推荐，不下场
-        if regime in ("crash", "bear") and regime_result["score"] <= 35:
-            print("  🛑 市场风险过高，今日不推荐任何股票")
-            final = []
-            final_max_rec = 0
-        # 将 regime 信息附加到 recommendations 供报告使用
-        _regime_info = regime_result
-        max_rec = final_max_rec
+        if regime_result is not None:
+            regime_max = regime_result["max_recommend"]
+            final_max_rec = min(max_rec, regime_max) if regime != "bull" else max_rec
+            print(f"  🎯 大盘择时: {regime} | 得分 {regime_result['score']}/100 | "
+                  f"推荐上限 {max_rec} → {final_max_rec}")
+            # crash/bear 模式执行空仓策略：清空推荐，不下场
+            if regime_filter is not None and regime_filter.should_empty_portfolio(
+                    regime, regime_result["score"]):
+                print(f"  🛑 市场风险过高（{regime}模式，得分{regime_result['score']}），今日不推荐任何股票")
+                final = []
+                final_max_rec = 0
+            max_rec = final_max_rec
     except Exception as e:
-        logger.warning("大盘择时评估失败，沿用默认推荐上限: %s", e)
-        _regime_info = None
+        logger.warning("大盘择时缩减推荐失败，沿用默认推荐上限: %s", e)
 
     recommendations = final[:max_rec]
 
@@ -1420,7 +1493,8 @@ def run_premarket(config):
                     ret = (exit_price / entry - 1) * 100
                     db.update_performance(
                         check_date, past["code"],
-                        **{param_field: round(ret, 2)}
+                        **{param_field: round(ret, 2)},
+                        mode=past.get("mode") or "premarket",
                     )
     except Exception as e:
         logger.warning("更新历史表现失败: %s", e)
@@ -1437,6 +1511,7 @@ def run_premarket(config):
         trade_config=trade_cfg,
         rotation_data=rotation_data,
         history_records=history,
+        report_role="research",
     )
     report_path = reporter.save_report(report_content)
     print(f"  ✅ 盘前报告已生成: {report_path}")
@@ -1492,13 +1567,86 @@ def run_premarket(config):
     print(f"  盘前模式完成! 总耗时: {_elapsed:.0f}s")
     print(f"  候选池: {len(candidates_df)} → 深度计算: {len(scored_stocks)}")
     print(f"  信号筛选: {len(qualified)} → 达标推荐: {len(recommendations)}")
-    print(f"  9:25请执行: python run_daily.py --intraday")
+    print("  9:25请执行: python run_daily.py --intraday")
     print("=" * 60)
 
 
 # ======================================================================
 # 盘中模式：读缓存 + 刷实时行情 + 重排序
 # ======================================================================
+def _open_paper_trades_for_recs(db, market_fetcher, trade_cfg: dict,
+                                 recommendations: list, today: str,
+                                 score_field: str = "score",
+                                 label: str = "午后"):
+    """为推荐列表开纸面仓位（ATR动态止损止盈 + 仓位管理 + 追踪止盈参数），
+    与盘前模式完全同口径；同一股票已有未平仓仓位时跳过。
+
+    数据闭环意义：此前只有盘前推荐开仓，无法用历史数据回答
+    "早盘推荐和午后推荐哪个更准"——午后推荐同样开仓后即可分别归因。
+    score_field: 推荐dict中分数键名(盘前=score, 午后=afternoon_score)。
+    """
+    if not recommendations:
+        return
+    atr_calc = ATRStopLoss()
+    pos_mgr = PositionManager(max_stop_loss_pct=trade_cfg.get("max_stop_loss_pct", -0.08))
+    account_capital = trade_cfg.get("account_capital", 100000)
+    opened = 0
+    for rec in recommendations:
+        code = rec["code"]
+        entry_price = rec.get("current_price", 0) or 0
+        score = rec.get(score_field, 0) or 0
+        atr_value = 0
+        if entry_price > 0:
+            try:
+                hist = market_fetcher.get_stock_history(code, days=30)
+                if hist is not None and not hist.empty:
+                    atr_series = atr_calc.calculate_atr(hist)
+                    atr_raw = float(atr_series.iloc[-1]) if not atr_series.empty else 0
+                    atr_value = atr_raw if atr_raw > entry_price * 0.005 else 0
+            except Exception:
+                atr_value = 0
+
+        pos_info = pos_mgr.calculate_position(score, account_capital, max(entry_price, 1))
+        sl_info = pos_mgr.calculate_stop_loss(entry_price, atr_value, score)
+        tp_info = pos_mgr.calculate_take_profit(entry_price, atr_value, score)
+
+        factors = rec.get("factors")
+        if factors is None:
+            factors = {}
+            rec["factors"] = factors
+        factors["position_pct"] = pos_info["position_pct"]
+
+        try:
+            if db.has_open_position(code):
+                continue
+            db.open_paper_trade(
+                trade_date=today,
+                code=code,
+                name=rec.get("name", code),
+                score=score,
+                entry_price=entry_price,
+                position_pct=pos_info["position_pct"],
+                shares=pos_info["shares"],
+                trade_config={
+                    "stop_loss_price": sl_info["stop_loss"],
+                    "stop_loss_pct": round(sl_info["stop_loss_pct"] / 100, 4),
+                    "take_profit_price": tp_info["take_profit"],
+                    "take_profit_pct": round(tp_info["take_profit_pct"] / 100, 4),
+                    "atr_multiplier": sl_info["atr_multiplier"],
+                    "trailing_activated": False,
+                    "trailing_stop_price": 0,
+                    "trailing_pct": 3.0,
+                    "hold_days": trade_cfg.get("hold_days", 3),
+                    "shares": pos_info["shares"],
+                },
+            )
+            opened += 1
+        except Exception as e:
+            logger.warning("%s开仓失败 %s: %s", label, code, e)
+    if opened:
+        print(f"  📋 {label}纸面开仓 {opened} 笔")
+
+
 def run_intraday(config):
     print("=" * 60)
     print("  盘中模式 — 快速修正")
@@ -1511,7 +1659,7 @@ def run_intraday(config):
     cache = load_cache(f"premarket_{today}.json")
     if cache is None:
         print(f"  ❌ 未找到盘前缓存 cache/premarket_{today}.json")
-        print(f"  → 请先运行盘前模式: python run_daily.py --premarket")
+        print("  → 请先运行盘前模式: python run_daily.py --premarket")
         return
 
     print(f"  ✅ 载入盘前候选池: {len(cache['candidates'])} 只 (计算于 {cache['run_at']})")
@@ -1533,11 +1681,11 @@ def run_intraday(config):
     # 大盘崩盘检测:对 open 仓位止损清仓(解决7-24盘前开仓后当天崩盘问题)
     _check_crash_and_close_positions(fresh, config)
 
-    # 2. 对候选池重新排序（用最新行情修正评分）
+    # 2. 对候选池刷新评分（仅作观察池快照与预警依据，不产出买入推荐）
     print("\n刷新候选池评分...")
     candidates = cache["candidates"]
-    bp_by_code = {c["code"]: c.get("business_profile") for c in candidates}
     updated = []
+    excluded = []  # 涨跌停/停牌等不可交易票 → 预警输出
     for c in candidates:
         code = c["code"]
         name = c["name"]
@@ -1545,7 +1693,8 @@ def run_intraday(config):
         row = price_map.get(code)
 
         if row is None:
-            continue  # 停牌或已无数据
+            excluded.append({"code": code, "name": name, "reason": "停牌或无行情"})
+            continue
 
         new_price = float(row.get("最新价", 0))
         change_pct = float(row.get("涨跌幅", 0) or 0)
@@ -1553,6 +1702,7 @@ def run_intraday(config):
         turnover = float(row.get("换手率", 0) or 0)
 
         if new_price <= 0:
+            excluded.append({"code": code, "name": name, "reason": "价格无效"})
             continue
 
         # 基础分 = 盘前评分（因子分）
@@ -1572,11 +1722,15 @@ def run_intraday(config):
             elif price_change_pct < -1:
                 intraday_score -= 1
 
-            # 涨停/跌停过滤
+            # 涨停/跌停过滤 → 转为不可交易预警
             if change_pct >= 9.5:
-                continue  # 涨停买不进
+                excluded.append({"code": code, "name": name,
+                                 "reason": f"涨停 {change_pct:+.1f}%，买不进"})
+                continue
             if change_pct <= -9.5:
-                continue  # 跌停风险
+                excluded.append({"code": code, "name": name,
+                                 "reason": f"跌停 {change_pct:+.1f}%，回避"})
+                continue
 
         # 量比修正
         if volume_ratio > 2:
@@ -1594,20 +1748,13 @@ def run_intraday(config):
         c["volume_ratio"] = volume_ratio
         updated.append(c)
 
-    # 3. 排序选优
+    # 3. 排序（仅作观察池快照）
     updated.sort(key=lambda x: x["intraday_score"], reverse=True)
-    top5 = updated[:5]
-    print(f"\n盘中 Top5:")
-    for i, c in enumerate(top5, 1):
-        print(f"  {i}. {c['name']}({c['code']}) "
-              f"盘前{c['score']}分 → 盘中{c['intraday_score']}分 "
-              f"现价{c.get('intraday_price', 0):.2f} "
-              f"{c.get('intraday_change', 0):+.1f}% "
-              f"量比{c.get('volume_ratio', 0):.1f}")
 
-    # === 入场风险过滤：与盘前模式同口径（剔除追涨/套牢盘重/量价背离） ===
+    # === 入场风险过滤 → 转为高风险预警标记 ===
     # 盘中模式复用盘前缓存，须与盘前一致的入场风险过滤，避免盘前判死的高风险票被盘中捞回
     filter_cfg = config.get("filter", {})
+    risky = []
     try:
         risk_inputs = []
         for c in updated:
@@ -1626,18 +1773,41 @@ def run_intraday(config):
             })
         kept = _filter_high_risk_entries(risk_inputs, filter_cfg)
         kept_codes = {x["code"] for x in kept}
+        for x in risk_inputs:
+            if x["code"] not in kept_codes:
+                risky.append(x)
         updated = [c for c in updated if c["code"] in kept_codes]
     except Exception as e:
         logger.warning("盘中入场风险过滤失败(不影响主流程): %s", e)
 
-    # 4. 选达标推荐
-    min_score = filter_cfg.get("min_score", 55)
-    max_rec = filter_cfg.get("max_recommend", 2)
-    qualified = [c for c in updated if c["intraday_score"] >= min_score]
-    final = qualified[:max_rec]
+    # === 预警输出 ===
+    # 设计约定(T+1)：尾盘持有期从收盘起算，14:40 午后模式的报告才是买入决策依据；
+    # 09:25 盘中只负责三件事：崩盘清仓 / 不可交易预警 / 高风险票预警。
+    # 此前盘中产出独立推荐排序，修正幅度小(±3)却制造了"早盘 vs 午盘推荐不一致"的困惑。
+    print("\n" + "-" * 40)
+    print("  ⚠️ 盘中预警(非买入依据):")
+    for w in excluded[:8]:
+        print(f"    ⛔ {w['name']}({w['code']}): {w['reason']}")
+    for x in risky[:5]:
+        sig = (x.get("factors") or {}).get("next_day_prediction") or {}
+        reasons = "；".join((sig.get("reasons") or [])[:1])
+        print(f"    🚫 {x['name']}({x['code']}): 高风险入场 {reasons}")
+    if not excluded and not risky:
+        print("    无异常")
 
-    # 5. 生成报告
-    print("\n生成最终报告...")
+    top5 = updated[:5]
+    print(f"\n  👀 观察池 Top{len(top5)} (按实时行情刷新，最终决策以14:40午后报告为准):")
+    for i, c in enumerate(top5, 1):
+        drift = c["intraday_score"] - c["score"]
+        arrow = "↑" if drift >= 1 else ("↓" if drift <= -1 else "→")
+        print(f"  {i}. {c['name']}({c['code']}) "
+              f"盘前{c['score']}分 → 实时{c['intraday_score']}分 {arrow} "
+              f"现价{c.get('intraday_price', 0):.2f} "
+              f"{c.get('intraday_change', 0):+.1f}% "
+              f"量比{c.get('volume_ratio', 0):.1f}")
+
+    # 4. 生成预警版报告（不含推荐列表）
+    print("\n生成盘中预警报告...")
     reporter = ReportGenerator()
     now_str = datetime.now().strftime("%H:%M")
 
@@ -1648,72 +1818,35 @@ def run_intraday(config):
     rotation_dict = cache.get("rotation_data", {})
     trade_cfg = cache.get("trade_config", config.get("trade", {}))
 
-    recommendations = []
-    for c in final:
-        sig = c.get("signals", {})
-        recommendations.append({
-            "code": c["code"],
-            "name": c["name"],
-            "current_price": c.get("intraday_price", 0),
-            "score": c["intraday_score"],
-            "business_profile": bp_by_code.get(c["code"]),
-            "factors": {
-                "strategies_triggered": sig.get("strategies", []),
-                "strategy_count": sig.get("strategy_count", 0),
-                "macd_golden_cross": sig.get("macd_golden_cross", 0),
-                "volume_price_up": sig.get("volume_price_up", 0),
-                "breakout_20d_high": sig.get("breakout_20d_high", 0),
-                "news_score": c.get("news_score", 50),
-                "next_day_prediction": sig.get("next_day", sig.get("next_day_prediction", "neutral")),
-                "oversold_rebound_detected": sig.get("oversold_rebound_detected", False),
-                "quant_risk": sig.get("quant_risk", "low"),
-                "quant_detected": sig.get("quant_detected", False),
-                "sustainability_score": sig.get("sustainability_score", 50),
-                "profit_taking_detected": sig.get("profit_taking_detected", False),
-                "hot_concepts": sig.get("hot_concepts", ""),
-                "hot_money_score": c.get("hot_money_score", 0),
-                "sector_linkage_score": c.get("sector_linkage_score", 50),
-                "intraday_change": c.get("intraday_change", 0),
-                "volume_ratio": c.get("volume_ratio", 0),
-                "premarket_score": c.get("score", 0),
-                "close_price": c.get("premarket_price", 0),
-            },
-        })
-
-    db = StockDatabase()
-    history = db.get_recent_recommendations(days=14)
     report_content = reporter.generate_report(
-        recommendations=recommendations,
+        recommendations=[],
         market_overview=index_data,
         global_markets=global_markets_list,
         news_analysis=news_analysis,
         sentiment=sentiment_dict,
         trade_config=trade_cfg,
         rotation_data=rotation_dict,
-        history_records=history,
-        intraday_note=f"盘中修正于 {now_str}",
+        history_records=None,
+        report_role="warning",
+        intraday_note=f"盘中预警于 {now_str}",
     )
     report_path = reporter.save_report(report_content)
 
-    write_summary("intraday", len(candidates), final,
-                   updated=len(updated))
+    write_summary("intraday_watch", len(candidates), [],
+                   excluded=len(excluded), risky=len(risky))
 
     print("\n" + "=" * 60)
-    print("  盘中模式完成!")
-    print(f"  修正候选: {len(updated)} 只")
-    print(f"  达标推荐: {len(final)} 只")
+    print("  盘中预警完成! (本档不产出买入推荐)")
+    print(f"  观察池: {len(updated)} 只 | 不可交易: {len(excluded)} | 高风险: {len(risky)}")
     print(f"  报告文件: {report_path}")
+    print("  💡 买入决策请以 14:40 午后《尾盘最终决策版》为准")
     print("=" * 60)
-    if final:
-        print("\n今日推荐:")
-        for i, c in enumerate(final, 1):
-            print(f"  {i}. {c['name']}({c['code']}) - {c['intraday_score']}分 {c.get('intraday_change', 0):+.1f}%")
-    else:
-        print("\n今日无达标推荐，建议观望")
 
 
 # ======================================================================
-# 午后模式：早盘真实成交数据深度修正（建议13:00开盘运行）
+# 午后模式：早盘真实成交数据深度修正（建议14:40运行——
+# 尾盘最后半小时是主力拉升/出货的揭晓时段，越接近收盘信息越完整；
+# 14:40启动约3-5分钟出报告，留足14:45-14:55下单窗口，避免被迫进收盘集合竞价）
 # ======================================================================
 def run_afternoon(config):
     print("=" * 60)
@@ -1727,7 +1860,7 @@ def run_afternoon(config):
     cache = load_cache(f"premarket_{today}.json")
     if cache is None:
         print(f"  ❌ 未找到盘前缓存 cache/premarket_{today}.json")
-        print(f"  → 请先运行盘前模式: python run_daily.py --premarket")
+        print("  → 请先运行盘前模式: python run_daily.py --premarket")
         return
 
     print(f"  ✅ 载入盘前候选池: {len(cache['candidates'])} 只 (计算于 {cache['run_at']})")
@@ -1888,23 +2021,32 @@ def run_afternoon(config):
               f"{change_pct:+.1f}% 量比{volume_ratio:.1f} 净流入{net_inflow:.0f}万")
 
     # === ML模型辅助信号（可选，不影响主流程）===
+    # 特征来源必须是盘前 factor_snapshots 的完整原始因子(与训练数据同源)。
+    # 此前传 updated 里不存在的 factors 键 → 永远 predict({}) → 特征全默认值50，
+    # 属于分布外推理的伪修正，已修复。
     try:
         from src.engine.ml_selector import MLStockSelector
         ml = MLStockSelector()
         if os.path.exists(ml.model_path):
-            print("\n  🤖 ML模型预测...")
+            print("\n  🤖 ML模型预测(基于盘前因子快照)...")
+            snap_db = StockDatabase()
+            n_ml = 0
             for c in updated:
-                pred = ml.predict(c.get("factors", {}) if "factors" in c else {})
+                raw_factors = snap_db.get_factor_snapshot_raw_factors(c["code"], today)
+                if not raw_factors:
+                    continue  # 无快照则跳过该股，不用默认值硬预测
+                pred = ml.predict(raw_factors)
                 ml_score = pred.get("ml_score", 50)
                 c["ml_score"] = ml_score
                 c["afternoon_score"] = round(c["afternoon_score"] + (ml_score - 50) * 0.05, 1)
-            print(f"    ML模型已加载，对午后评分做了辅助修正（权重5%）")
+                n_ml += 1
+            print(f"    ML辅助修正完成: {n_ml}/{len(updated)} 只有权重5%的微调")
     except Exception as e:
         logger.warning("ML模型预测失败(不影响主流程): %s", e)
 
     updated.sort(key=lambda x: x["afternoon_score"], reverse=True)
 
-    print(f"\n午后修正 Top5:")
+    print("\n午后修正 Top5:")
     for i, c in enumerate(updated[:5], 1):
         print(f"  {i}. {c['name']}({c['code']}) "
               f"盘前{c['premarket_score']}分 → 午后{c['afternoon_score']}分 "
@@ -1940,8 +2082,8 @@ def run_afternoon(config):
     except Exception as e:
         logger.warning("午后入场风险过滤失败(不影响主流程): %s", e)
 
-    # 生成推荐
-    min_score = filter_cfg.get("min_score", 50)
+    # 生成推荐（达标线与盘前/盘中统一取 config，避免三档口径漂移）
+    min_score = filter_cfg.get("min_score", 53)
     max_rec = filter_cfg.get("max_recommend", 2)
     qualified = [c for c in updated if c["afternoon_score"] >= min_score]
     final = qualified[:max_rec]
@@ -1960,6 +2102,11 @@ def run_afternoon(config):
             factors=rec,
         )
 
+    # 同步开纸面仓位：以午后实际价格为入场基准(尾盘决策的真实成本)。
+    # 与盘前推荐分开归因，积累数据后即可对比"盘前 vs 午后"推荐的历史准确率
+    _open_paper_trades_for_recs(db, market_fetcher, trade_cfg, final,
+                                 today, score_field="afternoon_score",
+                                 label="午后")
     # 生成报告
     print("\n生成午后报告...")
     reporter = ReportGenerator()
@@ -2013,7 +2160,7 @@ def run_afternoon(config):
         trade_config=trade_cfg,
         rotation_data=rotation_dict,
         history_records=history,
-        intraday_note="午后修正",
+        report_role="final",
     )
     report_path = reporter.save_report(report_content)
 
@@ -2087,7 +2234,7 @@ def run_factor_ic(config):
 
     high_corr = optimizer.analyze_factor_correlation(factor_data)
     if not high_corr.empty and len(high_corr) > 0:
-        print(f"  ⚡ 高度相关因子对（>0.7）：")
+        print("  ⚡ 高度相关因子对（>0.7）：")
         for _, row in high_corr.iterrows():
             print(f"      {row['factor1']} ↔ {row['factor2']}: {row['correlation']:.3f}")
 
@@ -2173,7 +2320,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="股票预测系统")
     parser.add_argument("--premarket", action="store_true", help="盘前模式：全量因子计算（建议7:00-8:00运行）")
     parser.add_argument("--intraday", action="store_true", help="盘中模式：基于盘前缓存快速修正（建议9:25运行）")
-    parser.add_argument("--afternoon", action="store_true", help="午后模式：基于早盘真实成交+资金流向深度修正（建议13:00运行）")
+    parser.add_argument("--afternoon", action="store_true", help="午后模式：基于全天真实成交+资金流向深度修正（建议14:40运行，尾盘最终决策）")
     parser.add_argument("--factor-ic", action="store_true", help="因子IC评估：从数据库加载历史数据计算因子IC")
     parser.add_argument("--lookback", type=int, default=60, help="因子IC回溯天数")
     args = parser.parse_args()

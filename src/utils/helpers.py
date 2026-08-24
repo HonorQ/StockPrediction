@@ -3,7 +3,43 @@
 """
 import pandas as pd
 import numpy as np
-from typing import List, Optional
+
+
+def get_limit_pct(code: str = "", name: str = "") -> float:
+    """按板块与ST标记返回涨跌停幅度(%)。
+
+    A股各板块口径不同，此前多处硬编码 ±9.5/1.1 导致
+    20cm(创业/科创)、30cm(北交)、5%(ST) 全部误判。
+
+    规则:
+      - 北交所(bj前缀 或 4/8开头): 30%
+      - 创业板(300/301/302): 20%
+      - 科创板(688/689): 20%
+      - 名称含 ST/*ST: 5% (优先级高于板块)
+      - 其他主板: 10%
+    """
+    name_upper = (name or "").upper()
+    if "ST" in name_upper and name_upper:
+        return 5.0
+
+    code_str = str(code or "").strip()
+    # 去掉交易所前缀 (sz/sh/bj)
+    raw = code_str[-6:] if len(code_str) >= 6 else code_str
+    if code_str.lower().startswith("bj") or (raw and raw[0] in ("4", "8")) or raw.startswith("92"):
+        return 30.0
+    if raw.startswith(("300", "301", "302", "688", "689")):
+        return 20.0
+    return 10.0
+
+
+def limit_up_price(pre_close: float, pct: float) -> float:
+    """涨停价（按百分比四舍五入到分）"""
+    return round(float(pre_close) * (1 + pct / 100), 2)
+
+
+def limit_down_price(pre_close: float, pct: float) -> float:
+    """跌停价（按百分比四舍五入到分）"""
+    return round(float(pre_close) * (1 - pct / 100), 2)
 
 
 def safe_divide(a, b, default=0.0):

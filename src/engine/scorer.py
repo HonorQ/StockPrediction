@@ -1,8 +1,14 @@
 """
-综合评分器 - 22维度评分（含护城河moat+深度研究+板块联动+资金流向+机构调研+龙虎榜+龙头检测）
+综合评分器 - 24维度评分（含护城河moat+深度研究+板块联动+资金流向+机构调研+龙虎榜+龙头检测）
+
+维度清单见 get_sub_scores；config.yaml weights 必须与此处24维一一对应，
+启动时由 run_daily._validate_weights_consistency 强制校验。
 """
 from typing import Dict, List
+import logging
 import pandas as pd
+
+logger = logging.getLogger("stock_prediction")
 
 
 class StockScorer:
@@ -19,31 +25,31 @@ class StockScorer:
 
     def __init__(self, weights: Dict[str, float] = None):
         self.weights = weights or {
-            # K线类: 12% (从26%大幅降低，因为K线可被主力操纵)
+            # K线类: 11% (从26%大幅降低，因为K线可被主力操纵)
             "trend": 0.03,
             "strategy": 0.02,
             "chip": 0.03,
-            "ashare_specific": 0.03,
+            "ashare_specific": 0.02,
             "relative_strength": 0.01,
 
-            # 资金行为: 17% (从15%提升，核心跟踪主力)
-            "quant_behavior": 0.07,
-            "capital_behavior": 0.10,
+            # 资金行为: 15% (核心跟踪主力)
+            "quant_behavior": 0.06,
+            "capital_behavior": 0.09,
 
-            # 基本面+事件: 30% (从17%大幅提升，真正驱动股价)
-            "fundamental": 0.10,
-            "policy_event": 0.08,
+            # 基本面+事件: 28% (真正驱动股价)
+            "fundamental": 0.09,
+            "policy_event": 0.07,
             "news": 0.07,
             "deep_research": 0.05,
 
-            # 其他: 41%
-            "sector_rotation": 0.06,
+            # 其他: 46%
+            "sector_rotation": 0.05,
             "institutional": 0.05,
             "dragon_tiger": 0.04,
             "national_team": 0.04,
-            "oversold_rebound": 0.04,
+            "oversold_rebound": 0.02,
             "leader": 0.03,
-            "margin_trading": 0.04,
+            "margin_trading": 0.02,
             "shareholder": 0.04,
             "lockup_risk": 0.04,
             "research": 0.01,
@@ -51,6 +57,16 @@ class StockScorer:
             "holder_concentration": 0.05,
             "circulate_holder": 0.03,
         }
+        # 权重和保护：原默认表总和=1.10、config.yaml=0.9821，
+        # 尺度漂移会让 entry_score/min_score 阈值的实际含义失真。
+        # 相对结构不变，等比缩放回总和=1。
+        _total = sum(self.weights.values())
+        if abs(_total - 1.0) > 1e-9:
+            logger.warning(
+                "权重总和=%.4f ≠ 1.0，已按比例归一化(×%.4f)",
+                _total, 1.0 / _total,
+            )
+            self.weights = {k: v / _total for k, v in self.weights.items()}
 
     def get_sub_scores(self, factors: Dict) -> Dict[str, float]:
         return {
@@ -100,12 +116,19 @@ class StockScorer:
 
     @staticmethod
     def batch_normalize(candidates: List[Dict], weights: Dict[str, float]):
-        """截面Z-Score归一化：对一批候选的20维子评分做标准化，计算最终得分
+        """截面Z-Score归一化：对一批候选的24维子评分做标准化，计算最终得分
         candidates: list of dicts, 每项需包含 'sub_scores' 和 'expectation_penalty'
         修改每个candidate，添加 'score' 和 'z_scores'
 
+        评分口径说明: score = 50 + z_total*(50/3)，z 截断 ±3。
+        min_score 门槛在此口径下含义是"z_total ≥ (min_score-50)*3/50"，
+        如 min_score=53 仅相当于 z_total≈0.18(极宽松)——真正的数量约束
+        是 max_recommend；调 min_score 时应按此换算预期通过率。
+
         新增：在 Z-Score 之前对预定义的高相关因子对做残差化正交处理，
         防止共线因子在加权时被重复计算（双重 beta 暴露）。
+        正交化对支持动态扩展：feedback_loop 的 IC 分析会基于截面相关性
+        追加新对到 ORTHOGONALIZE_PAIRS。
         """
         dims = [k for k in weights.keys() if weights.get(k, 0) > 0]
         if not dims or not candidates:

@@ -3,26 +3,25 @@ K 线可重建因子计算器 — 反馈训练专用
 
 职责：
   从 baostock K 线行 (date, close, volume, turn, pctChg) 重建生产 scorer.get_sub_scores
-  口径的 22 维子评分。只计算可从历史 K 线重建的因子，无法重建的（新闻/资金流/龙虎榜/护城河等）
+  口径的 24 维子评分。只计算可从历史 K 线重建的因子，无法重建的（新闻/资金流/龙虎榜/护城河等）
   置为 50（中性），不强行造数据。
 
 可重建的因子（9 维）：
   trend / strategy / chip / relative_strength / ashare_specific
   quant_behavior / capital_behavior / deep_research / oversold_rebound
 
-无法重建的因子（12 维，置 50）：
+无法重建的因子（15 维，置 50）：
   fundamental / institutional / sector_rotation / news / margin_trading
   shareholder / lockup_risk / research / dragon_tiger / leader
-  policy_event / national_team
+  policy_event / national_team / holder_concentration / circulate_holder
 
 输出：
   {factor_name: sub_score (0-100)} — 与 StockScorer.get_sub_scores 完全一致
 """
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, List
 import pandas as pd
-import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
@@ -40,13 +39,15 @@ from src.factors.sector_rotation import OversoldReboundStrategy
 from src.engine.scorer import StockScorer
 
 
-# 22 维因子完整列表（含护城河moat，与 StockScorer.get_sub_scores 一致）
+# 24 维因子完整列表（与 StockScorer.get_sub_scores 完全一致，
+# 原清单缺 holder_concentration / circulate_holder 两维）
 ALL_FACTORS = [
     "trend", "strategy", "chip", "fundamental", "institutional",
     "sector_rotation", "oversold_rebound", "news", "relative_strength",
     "ashare_specific", "quant_behavior", "margin_trading", "shareholder",
     "lockup_risk", "research", "dragon_tiger", "leader", "deep_research",
     "policy_event", "national_team", "capital_behavior", "moat",
+    "holder_concentration", "circulate_holder",
 ]
 
 # 可从 K 线重建的因子
@@ -96,7 +97,10 @@ def baostock_rows_to_dataframe(kline_rows: List[List]) -> pd.DataFrame:
             high_val = max(open_val, close) * 1.005
             low_val = min(open_val, close) * 0.995
 
-        amount = close * vol * 100
+        # baostock volume 单位为「股」，生产口径(腾讯K线)为「手」→ 除以100对齐；
+        # 成交额(元) = 收盘价 × 股数。原 close*vol*100 把成交额放大百倍污染量价因子
+        amount = close * vol
+        vol_lots = vol / 100.0
 
         records.append({
             "日期": str(date_str),
@@ -104,7 +108,7 @@ def baostock_rows_to_dataframe(kline_rows: List[List]) -> pd.DataFrame:
             "收盘": close,
             "最高": high_val,
             "最低": low_val,
-            "成交量": vol,
+            "成交量": vol_lots,
             "成交额": amount,
             "换手率": turn,
             "涨跌幅": pct,
@@ -235,7 +239,7 @@ def calc_factors_from_kline(kline_rows: List[List], market_df: pd.DataFrame = No
 def calc_sub_scores_from_kline(kline_rows: List[List],
                                 weights: Dict[str, float] = None,
                                 market_df: pd.DataFrame = None) -> Dict[str, float]:
-    """从 baostock K 线行计算 21 维 sub_scores（与 StockScorer.get_sub_scores 完全一致）。
+    """从 baostock K 线行计算 24 维 sub_scores（与 StockScorer.get_sub_scores 完全一致）。
 
     Args:
         kline_rows: baostock 行列表 [date, close, volume, turn, pctChg]
@@ -243,7 +247,7 @@ def calc_sub_scores_from_kline(kline_rows: List[List],
         market_df: 大盘历史 DataFrame，透传给 relative_strength（可选）
 
     Returns:
-        {factor_name: sub_score (0-100)} — 21 维齐全
+        {factor_name: sub_score (0-100)} — 24 维齐全
         可重建的因子有真实值，无法重建的因子 = 50（中性）
     """
     factors = calc_factors_from_kline(kline_rows, market_df=market_df)

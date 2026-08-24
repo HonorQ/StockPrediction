@@ -5,7 +5,6 @@ from src.utils.log import get_logger
 logger = get_logger()
 
 import pandas as pd
-import numpy as np
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List
@@ -202,7 +201,7 @@ class MoneyFlowContinuity:
                     result["flow_signals"].append("主力资金由流出转流入（逆转信号）")
                     result["flow_continuity_score"] = 65
 
-        except Exception as e:
+        except Exception:
             pass
 
         return result
@@ -252,7 +251,7 @@ class InstitutionalResearch:
                 # 数据源返回空数据，跳过
                 pass
 
-        except Exception as e:
+        except Exception:
             pass
 
         # 机构持仓（获取全量后按代码过滤）
@@ -279,7 +278,7 @@ class InstitutionalResearch:
                 except Exception:
                     continue
 
-        except Exception as e:
+        except Exception:
             pass
 
         result["research_score"] = max(0, min(100, result["research_score"]))
@@ -345,7 +344,6 @@ class DragonTigerBoard:
         尝试过去 5 天，命中第一个有数据的日期后缓存。
         """
         import akshare as ak
-        from datetime import datetime, timedelta
 
         today_str = datetime.now().strftime("%Y-%m-%d")
         if self._lhb_cache_date == today_str and self._lhb_cache:

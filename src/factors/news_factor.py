@@ -8,8 +8,8 @@
 """
 import math
 import re
-from datetime import datetime, timedelta
-from typing import List, Dict, Tuple
+from datetime import datetime
+from typing import List, Dict
 
 # 可选依赖：jieba 分词
 try:

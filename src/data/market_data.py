@@ -808,17 +808,53 @@ class MarketDataFetcher:
     # ------------------------------------------------------------------
     # 北向资金
     # ------------------------------------------------------------------
-    def get_north_flow(self) -> Dict:
-        """获取北向资金实时流入"""
+    def get_north_flow(self, lookback_days: int = 10) -> Dict:
+        """获取北向资金净流入及连续流向天数。
+
+        返回 {
+          "date": 最新交易日,
+          "net_inflow": 当日净流入(数值化, 单位与数据源一致),
+          "consecutive_days": 连续同向天数(正值=连续流入, 负值=连续流出, 0=中性/中断),
+          "net_flow": 兼容旧调用方
+        }
+        market_regime.assess_regime 的北向维度依赖 net_inflow/consecutive_days，
+        此前生产侧一直传 None 导致该维度从未参与择时判定。
+        """
+        result = {"date": "", "net_inflow": 0.0, "consecutive_days": 0, "net_flow": 0.0}
         try:
-            # 使用正确的接口名
             df = ak.stock_hsgt_fund_flow_summary_em()
-            if df is not None and not df.empty:
-                latest = df.iloc[-1]
-                return {
-                    "date": str(latest.get("日期", "")),
-                    "net_flow": latest.get("当日净流入", 0),
-                }
+            if df is None or df.empty:
+                return result
+            date_col = "日期" if "日期" in df.columns else None
+            flow_col = next(
+                (c for c in ("当日净流入", "北向净流入", "净流入") if c in df.columns), None
+            )
+            if not (date_col and flow_col):
+                logger.warning("北向资金接口列结构变化: %s", list(df.columns))
+                return result
+
+            df = df.sort_values(date_col)
+            recent = df.tail(lookback_days)
+            flows = pd.to_numeric(recent[flow_col], errors="coerce").dropna()
+            if flows.empty:
+                return result
+
+            latest = float(flows.iloc[-1])
+            sign_now = 1 if latest > 0 else (-1 if latest < 0 else 0)
+            consec = 0
+            if sign_now != 0:
+                for v in reversed(flows.tolist()):
+                    s = 1 if v > 0 else (-1 if v < 0 else 0)
+                    if s == sign_now:
+                        consec += 1
+                    else:
+                        break
+            result.update({
+                "date": str(recent[date_col].iloc[-1]),
+                "net_inflow": latest,
+                "consecutive_days": consec * sign_now,
+                "net_flow": latest,
+            })
         except Exception as e:
             logger.warning("获取北向资金失败: %s", e)
-        return {"date": "", "net_flow": 0}
+        return result

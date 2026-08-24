@@ -2,17 +2,18 @@
 大盘择时层（Market Regime Filter）
 
 根据大盘走势、市场情绪、北向资金、外盘环境判断当前市场状态，
-动态调整最大推荐数量和风险系数。避免在系统性下跌期间仍然推荐股票。
+动态调整最大推荐数量、风险系数和因子权重。避免在系统性下跌期间仍然推荐股票。
 
 状态：
-  bull      - 强势上行（满仓推荐）
+  bull      - 强势上行（满仓推荐，偏进攻因子）
   neutral   - 震荡中性（正常推荐）
-  bear      - 弱势下行（缩减推荐，提高门槛）
+  bear      - 弱势下行（缩减推荐，偏防守因子）
   crash     - 系统性风险（仅保留最强 1 只或全部观望）
 """
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta
 import pandas as pd
+import os
+import yaml
 
 
 class MarketRegimeFilter:
@@ -37,6 +38,65 @@ class MarketRegimeFilter:
     def __init__(self, market_fetcher=None):
         self.market_fetcher = market_fetcher
         self._index_cache: Dict[str, pd.DataFrame] = {}
+        self._regime_config = self._load_regime_config()
+
+    def _load_regime_config(self) -> Dict:
+        """加载regime权重配置"""
+        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "config.yaml")
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            return config.get("regime", {})
+        except Exception:
+            return {}
+
+    def get_regime_weights(self, regime: str, base_weights: Dict[str, float]) -> Dict[str, float]:
+        """根据regime返回调整后的因子权重（部分覆盖语义：仅覆盖列出的因子）
+
+        Args:
+            regime: 市场状态 (bull/neutral/bear/crash)
+            base_weights: 基准权重
+
+        Returns:
+            调整后的权重字典
+        """
+        if not self._regime_config.get("enabled", False):
+            return base_weights
+
+        regime_overrides = self._regime_config.get("weights", {}).get(regime, {})
+        if not regime_overrides:
+            return base_weights
+
+        adjusted = base_weights.copy()
+        # 只覆盖 base_weights 中已存在的评分维度。
+        # config.yaml 的 regime.weights 中含 24 维评分体系之外的 key(如 volatility)，
+        # 若新增进去会成为"恒为50分的废维度"(sub_scores 无此维，z 恒为 0)，
+        # 且违反权重-评分维度一致性原则(_validate_weights_consistency)，故跳过并告警。
+        skipped = []
+        for factor, weight in regime_overrides.items():
+            if factor in adjusted:
+                adjusted[factor] = weight
+            else:
+                skipped.append(factor)
+        if skipped:
+            import logging
+            logging.getLogger(__name__).warning(
+                "get_regime_weights(%s): 忽略不在评分体系中的权重维度: %s",
+                regime, sorted(skipped),
+            )
+        return adjusted
+
+    def should_empty_portfolio(self, regime: str, score: float) -> bool:
+        """判断是否应该空仓"""
+        if not self._regime_config.get("enabled", False):
+            return False
+        if not self._regime_config.get("empty_on_bear", True):
+            return False
+        if regime in ("crash",):
+            return True
+        if regime == "bear" and score <= self._regime_config.get("bear_score_threshold", 35):
+            return True
+        return False
 
     # ------------------------------------------------------------------
     def assess_regime(
@@ -209,8 +269,10 @@ class MarketRegimeFilter:
 
             ma20 = closes.rolling(window=20).mean().iloc[-1]
             current = closes.iloc[-1]
-            prev = closes.iloc[-2]
-            prev_ma20 = closes.iloc[-2:].rolling(window=20).mean().iloc[-1] if len(closes) >= 21 else ma20
+            # 昨日的MA20：对全序列 shift(1) 后取20窗口均值。
+            # 原写法 closes.iloc[-2:].rolling(20) 对最后2个元素做20窗口 → 恒NaN，
+            # 趋势上升/下降分支永远不可达
+            prev_ma20 = closes.shift(1).rolling(window=20).mean().iloc[-1] if len(closes) >= 21 else ma20
 
             if current > ma20 and ma20 > prev_ma20:
                 return "above_ma20_rising"

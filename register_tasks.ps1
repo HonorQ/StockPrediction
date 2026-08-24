@@ -2,7 +2,8 @@
   Register Windows scheduled tasks for the stock prediction system
   premarket: every day 07:00  python run_daily.py --premarket
   intraday : every day 09:25  python run_daily.py --intraday
-  afternoon: every day 14:00  python run_daily.py --afternoon
+  afternoon: every day 14:40  python run_daily.py --afternoon (tail close buy decision,
+              report ready ~14:45, order window 14:45-14:55 before closing auction)
 
   Run as admin:
     powershell -ExecutionPolicy Bypass -File register_tasks.ps1
@@ -56,8 +57,8 @@ $Tasks = @(
     },
     @{
         Name = "${TaskNamePrefix}_Afternoon"
-        Description = "Stock prediction - afternoon deep fix (daily 14:00, tail close buy decision)"
-        Trigger = New-ScheduledTaskTrigger -Daily -At 14:00
+        Description = "Stock prediction - afternoon final decision (daily 14:40, order window 14:45-14:55)"
+        Trigger = New-ScheduledTaskTrigger -Daily -At 14:40
         Action = New-ScheduledTaskAction -Execute $PythonExe -Argument "run_daily.py --afternoon" -WorkingDirectory $ProjectDir
     }
 )
@@ -89,7 +90,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Done! Tasks:" -ForegroundColor Cyan
 Write-Host "  Premarket: daily 07:00" -ForegroundColor Cyan
 Write-Host "  Intraday : daily 09:25" -ForegroundColor Cyan
-Write-Host "  Afternoon: daily 14:00" -ForegroundColor Cyan
+Write-Host "  Afternoon: daily 14:40 (final decision)" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Manual test:" -ForegroundColor Yellow

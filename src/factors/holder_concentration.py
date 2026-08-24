@@ -3,10 +3,8 @@
 判断标准：股东总数减少=筹码集中(利好)，股东总数增加=筹码分散(利空)
 """
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-from typing import Dict, Optional
-import os, json, time, hashlib
+from typing import Dict
+import os, json, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

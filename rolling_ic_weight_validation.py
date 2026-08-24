@@ -22,7 +22,7 @@
 """
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -206,7 +206,7 @@ def generate_report(windows: List[Dict], prior: Dict[str, float], signal_fail_wi
     lines.append("")
     lines.append(f"> 生成时间：{now}")
     lines.append(f"> 方法：[{TRAIN_MONTHS}个月 train → {TEST_MONTHS}个月 test] 滑动窗口；train 算 ICIR 加权权重，test 用该权重回测")
-    lines.append(f"> 数据源：factor_snapshots 24 维 sub_* JOIN recommendations.d3_return（真实历史快照 + T+3 收益）")
+    lines.append("> 数据源：factor_snapshots 24 维 sub_* JOIN recommendations.d3_return（真实历史快照 + T+3 收益）")
     lines.append(f"> 权重规则：w ∝ prior_i × max(0, ICIR_i)，仅 IC>0 且 ICIR>0 的因子参与；单次调整 ≤ {MAX_WEIGHT_CHANGE}")
     lines.append("")
     lines.append("## 一、各窗口结果")
@@ -297,7 +297,6 @@ def main():
     print(f"  交易日数：{len(dates)}（window 参数以自然月近似）")
 
     # 用自然月切分：train=120 交易日 ≈ 4 个月，test=20 ≈ 1 个月（简化用自然月）
-    from dateutil.relativedelta import relativedelta
     windows = []
     idx = 0
     # 滑动：从最早日期开始，test 窗口 1 个月，train 取 test 起点前 4 个月

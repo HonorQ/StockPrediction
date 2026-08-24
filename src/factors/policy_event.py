@@ -10,9 +10,8 @@
 import os
 import json
 import math
-import re
-from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from typing import Dict, List
+from datetime import datetime
 
 from src.factors.macro_event import MacroEventDetector
 

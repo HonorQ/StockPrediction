@@ -2,7 +2,6 @@
 经典选股策略 + K线形态识别
 """
 import pandas as pd
-import numpy as np
 from typing import Dict
 
 
@@ -115,7 +114,9 @@ class StockStrategies:
             return False
         close = df["收盘"] if "收盘" in df.columns else df["close"]
         ma30 = close.rolling(30).mean()
-        if ma30.isna().any():
+        # 只检查实际使用的尾部窗口(iloc[-31:])是否含NaN。
+        # 原写法 ma30.isna().any() 检查整条 rolling 序列，前29位必然NaN → 策略永远False
+        if ma30.iloc[-31:].isna().any():
             return False
         if not (ma30.iloc[-31] < ma30.iloc[-21] < ma30.iloc[-11] < ma30.iloc[-1]):
             return False
@@ -152,7 +153,8 @@ class StockStrategies:
             return False
         close = df["收盘"] if "收盘" in df.columns else df["close"]
         ma250 = close.rolling(250).mean()
-        if ma250.isna().any():
+        # 同 keep_increasing:只检查实际使用的尾部窗口
+        if ma250.iloc[-250:].isna().any():
             return False
         if close.iloc[-1] < ma250.iloc[-1]:
             return False

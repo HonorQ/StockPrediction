@@ -3,8 +3,9 @@
 识别A股量化交易特征：开盘秒板、尾盘闪崩、盘中异动、大单撤单、集合竞价异动
 """
 import pandas as pd
-import numpy as np
-from typing import Dict, List
+from typing import Dict
+
+from src.utils.helpers import get_limit_pct, limit_up_price as calc_limit_up, limit_down_price as calc_limit_down
 
 
 class QuantBehaviorDetector:
@@ -38,6 +39,11 @@ class QuantBehaviorDetector:
         signals = []
         score = 50
 
+        # 板块口径：按代码前缀/ST标记确定涨跌停幅度(10/20/30/5%)
+        realtime = realtime or {}
+        stock_code = str(realtime.get("代码", "") or "")
+        stock_name = str(realtime.get("名称", "") or "")
+
         # 1. 闪崩检测（巨量下跌）
         flash_crash = self._detect_flash_crash(df)
         if flash_crash["detected"]:
@@ -45,7 +51,7 @@ class QuantBehaviorDetector:
             score -= 15
 
         # 2. 秒板检测（开盘秒涨停）
-        instant_limit = self._detect_instant_limit(df)
+        instant_limit = self._detect_instant_limit(df, stock_code, stock_name)
         if instant_limit["detected"]:
             signals.append(instant_limit["signal"])
             score += 10 if instant_limit["type"] == "up" else -10
@@ -81,7 +87,7 @@ class QuantBehaviorDetector:
             score -= 10
 
         # 8. 涨停板质量检测
-        limit_quality = self._detect_limit_quality(df)
+        limit_quality = self._detect_limit_quality(df, stock_code, stock_name)
         if limit_quality["detected"]:
             signals.append(limit_quality["signal"])
             score -= 8 if limit_quality["type"] == "weak" else 5
@@ -145,7 +151,7 @@ class QuantBehaviorDetector:
 
         return result
 
-    def _detect_instant_limit(self, df: pd.DataFrame) -> Dict:
+    def _detect_instant_limit(self, df: pd.DataFrame, code: str = "", name: str = "") -> Dict:
         """
         秒板检测
         特征：开盘即涨停/跌停，量化抢筹/出货
@@ -165,9 +171,10 @@ class QuantBehaviorDetector:
         if pre_close <= 0 or open_price <= 0:
             return result
 
-        # 开盘价就是涨停/跌停
-        limit_up_price = round(pre_close * 1.1, 2)
-        limit_down_price = round(pre_close * 0.9, 2)
+        # 开盘价就是涨停/跌停（按板块口径，原硬编码1.1/0.9对20cm/30cm/ST全部误判）
+        limit_pct = get_limit_pct(code, name)
+        limit_up_price = calc_limit_up(pre_close, limit_pct)
+        limit_down_price = calc_limit_down(pre_close, limit_pct)
 
         if abs(open_price - limit_up_price) / limit_up_price < 0.001:
             result["detected"] = True
@@ -349,7 +356,7 @@ class QuantBehaviorDetector:
 
         return result
 
-    def _detect_limit_quality(self, df: pd.DataFrame) -> Dict:
+    def _detect_limit_quality(self, df: pd.DataFrame, code: str = "", name: str = "") -> Dict:
         """
         涨停板质量检测
         特征：涨停后反复开板（量化博弈）
@@ -368,10 +375,12 @@ class QuantBehaviorDetector:
         if pre_close <= 0:
             return result
 
-        limit_up_price = round(pre_close * 1.1, 2)
+        limit_pct = get_limit_pct(code, name)
+        limit_up_price = calc_limit_up(pre_close, limit_pct)
 
-        # 涨停但没封住
-        if change_pct > 9 and abs(close - limit_up_price) / limit_up_price > 0.005:
+        # 涨停但没封住（阈值按板块口径缩放：20cm股的"接近涨停"标准更宽松）
+        near_limit_change = limit_pct - 1
+        if change_pct > near_limit_change and abs(close - limit_up_price) / limit_up_price > 0.005:
             result["detected"] = True
             result["signal"] = "涨停未封住（量化博弈）"
             result["type"] = "weak"

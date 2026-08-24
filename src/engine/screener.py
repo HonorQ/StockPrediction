@@ -7,8 +7,11 @@
 from src.utils.log import get_logger
 logger = get_logger()
 
+import numpy as np
 import pandas as pd
 from typing import List, Dict
+
+from src.utils.helpers import get_limit_pct
 
 
 class StockScreener:
@@ -41,13 +44,18 @@ class StockScreener:
         # 排除停牌（成交额为0）
         mask &= df["成交额"] > 0
 
-        # 排除涨停（无法买入）
+        # 排除涨停/跌停（无法以涨停价买入；跌停风险过大）
+        # 按每只股票的板块口径(10/20/30cm,ST 5%)判定，原 ±9.8 一刀切漏掉 20cm 板块
         if "涨跌幅" in df.columns:
-            mask &= df["涨跌幅"] < 9.8
-
-        # 排除跌停（风险过大）
-        if "涨跌幅" in df.columns:
-            mask &= df["涨跌幅"] > -9.8
+            if "代码" in df.columns:
+                names = df["名称"].astype(str).values if "名称" in df.columns else [""] * len(df)
+                codes = df["代码"].astype(str).values
+                thresholds = np.array([get_limit_pct(c, n) - 0.3 for c, n in zip(codes, names)])
+                changes = pd.to_numeric(df["涨跌幅"], errors="coerce").fillna(0).values
+                mask &= (changes < thresholds) & (changes > -thresholds)
+            else:
+                mask &= df["涨跌幅"] < 9.8
+                mask &= df["涨跌幅"] > -9.8
 
         # 最小市值（仅当列存在且有有效数据时）
         if "总市值" in df.columns:
@@ -56,8 +64,11 @@ class StockScreener:
                 mask &= df["总市值"] >= self.min_market_cap
             else:
                 logger.info('  ⚠️ 总市值列无有效数据，跳过市值筛选')
-            if '成交额' in df.columns:
-                mask &= df["成交额"] >= self.min_turnover
+
+        # 流动性筛选独立于市值分支：
+        # 此前嵌套在"总市值列存在"块内，行情源缺总市值列时流动性过滤整体失效
+        if '成交额' in df.columns:
+            mask &= df["成交额"] >= self.min_turnover
 
         filtered = df[mask].copy()
         logger.info(f'  📋 第一层硬性筛选: {len(df)} → {len(filtered)} 只')
@@ -118,7 +129,12 @@ class StockScreener:
     def filter_by_score(
         self, stocks: List[Dict], min_score: float = 85
     ) -> List[Dict]:
-        """按综合评分筛选"""
+        """按综合评分筛选。
+
+        注意：score 来自截面 Z-Score 归一化(50 + z*50/3)，min_score=53
+        仅相当于 z_total≈0.18，门槛极宽松——真实数量约束是下游的
+        max_recommend 与 regime 缩减，调参时勿误以为本层在严格控制数量。
+        """
         qualified = [s for s in stocks if s.get("score", 0) >= min_score]
         logger.info(f'  ⭐ 第三层评分筛选: {len(stocks)} → {len(qualified)} 只 (≥{min_score}分)')
         return qualified

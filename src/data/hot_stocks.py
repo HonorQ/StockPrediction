@@ -4,9 +4,22 @@
 from src.utils.log import get_logger
 logger = get_logger()
 
+import numpy as np
 import pandas as pd
 import time
 from typing import Dict, List, Optional
+
+from src.utils.helpers import get_limit_pct
+
+
+def _limit_thresholds(df: pd.DataFrame) -> Optional[np.ndarray]:
+    """按每只股票的板块/ST口径计算涨停判定阈值数组（limit_pct - 0.5）。
+    缺代码列时返回 None，调用方退回 9.5 一刀切。"""
+    if "代码" not in df.columns:
+        return None
+    names = df["名称"].astype(str).values if "名称" in df.columns else [""] * len(df)
+    codes = df["代码"].astype(str).values
+    return np.array([get_limit_pct(c, n) - 0.5 for c, n in zip(codes, names)])
 
 
 class HotStocksFetcher:
@@ -83,7 +96,12 @@ class HotStocksFetcher:
                     break
             if change_col is None:
                 return pd.DataFrame()
-            limit_up = df[df[change_col] >= 9.5].copy()
+            # 涨停判定按板块口径(10/20/30cm,ST 5%)，原 ±9.5 一刀切漏掉 20cm/30cm、误判 ST
+            thresholds = _limit_thresholds(df)
+            if thresholds is not None:
+                limit_up = df[df[change_col].values >= thresholds].copy()
+            else:
+                limit_up = df[df[change_col] >= 9.5].copy()
             logger.info(f'  ✅ 涨停板: {len(limit_up)} 只')
             return limit_up
         except Exception as e:
@@ -103,7 +121,11 @@ class HotStocksFetcher:
                     break
             if change_col is None:
                 return pd.DataFrame()
-            limit_down = df[df[change_col] <= -9.5].copy()
+            thresholds = _limit_thresholds(df)
+            if thresholds is not None:
+                limit_down = df[df[change_col].values <= -thresholds].copy()
+            else:
+                limit_down = df[df[change_col] <= -9.5].copy()
             logger.info(f'  ✅ 跌停板: {len(limit_down)} 只')
             return limit_down
         except Exception as e:

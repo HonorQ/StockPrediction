@@ -10,9 +10,7 @@
 """
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-from collections import defaultdict
 
 
 BULLISH_THRESHOLD = 60   # >60 视为看多信号
@@ -36,21 +34,33 @@ def classify_signal(score: float, factor_median: float = 50.0) -> str:
     return "neutral"
 
 
-def evaluate_prediction(signal: str, actual_return: float) -> str:
-    """带缓冲带的归因评估。"""
+def evaluate_prediction(signal: str, actual_return: float,
+                        horizon: Optional[int] = None) -> str:
+    """带缓冲带的归因评估。
+
+    horizon(天)提供时，判定阈值按 sqrt(horizon/3) 缩放(以 d3 为基准)：
+    T+14 与 T+3 的天然波动幅度差异巨大，固定 ±1%% 阈值会让长窗口收益
+    几乎全部判 correct/短窗口几乎全部 neutral，混合统计时因子命中率失真。
+    """
+    scale = 1.0
+    if horizon:
+        scale = max((horizon / 3.0) ** 0.5, 0.5)
+    correct_min = CORRECT_RETURN_MIN * scale
+    wrong_max = WRONG_RETURN_MAX * scale
+
     if signal == "neutral":
         return "neutral"
     if signal == "bullish":
-        if actual_return > CORRECT_RETURN_MIN:
+        if actual_return > correct_min:
             return "correct"
-        elif actual_return < WRONG_RETURN_MAX:
+        elif actual_return < wrong_max:
             return "wrong"
         else:
             return "neutral"  # 横盘不计数
     if signal == "bearish":
-        if actual_return < -CORRECT_RETURN_MIN:
+        if actual_return < -correct_min:
             return "correct"
-        elif actual_return > -WRONG_RETURN_MAX:
+        elif actual_return > -wrong_max:
             return "wrong"
         else:
             return "neutral"
@@ -60,13 +70,17 @@ def evaluate_prediction(signal: str, actual_return: float) -> str:
 class FactorAttribution:
     """单条推荐的因子归因"""
 
-    def __init__(self, recommendation: Dict, actual_return: float):
+    def __init__(self, recommendation: Dict, actual_return: float,
+                 horizon: Optional[int] = None):
         self.code = recommendation.get("code", "")
         self.name = recommendation.get("name", "")
         self.trade_date = recommendation.get("trade_date", "")
         self.score = recommendation.get("score", 0)
         self.actual_return = actual_return
-        self.is_failure = actual_return < FAIL_RETURN_THRESHOLD
+        self.horizon = horizon
+        # 失败判定阈值同步按持有期缩放(-3% 是短窗口口径)
+        fail_scale = max(((horizon or 3) / 3.0) ** 0.5, 0.5)
+        self.is_failure = actual_return < FAIL_RETURN_THRESHOLD * fail_scale
 
         sub_scores = recommendation.get("sub_scores", {})
         factor_median = 50.0
@@ -77,7 +91,7 @@ class FactorAttribution:
         self.factor_results = {}
         for factor, score in sub_scores.items():
             signal = classify_signal(score, factor_median)
-            result = evaluate_prediction(signal, actual_return)
+            result = evaluate_prediction(signal, actual_return, horizon=horizon)
             self.factor_results[factor] = {
                 "score": score,
                 "signal": signal,
@@ -104,6 +118,7 @@ class FactorAttribution:
             "score": self.score,
             "actual_return": round(self.actual_return, 2),
             "is_failure": self.is_failure,
+            "return_horizon": self.horizon,
             "factor_results": self.factor_results,
         }
 

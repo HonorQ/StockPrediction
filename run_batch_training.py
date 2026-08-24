@@ -7,11 +7,10 @@
   4. 保存到 database.factor_snapshots
   5. 训练LightGBM+RF集成模型，保存到 models/
 """
-import sys, os, re, time, json, numpy as np, pandas as pd
+import sys, os, time, json, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
-from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 import yaml
@@ -125,7 +124,7 @@ def compute_factors_and_future_returns(code, kline_df, trade_date, kc):
 
 def main():
     print("=" * 60)
-    print(f"  批量回算训练数据生成")
+    print("  批量回算训练数据生成")
     print(f"  日期: {START_DATE} → {END_DATE}")
     print("=" * 60)
 
@@ -133,7 +132,7 @@ def main():
     stocks = get_stock_list()
     print(f"  {len(stocks)} 只股票")
 
-    print(f"\n[2/5] 预取K线（腾讯行情, ~500天）...")
+    print("\n[2/5] 预取K线（腾讯行情, ~500天）...")
     kc = prefetch_history(stocks, days=600, max_workers=8)
     print(f"  ✅ 完成: {len(kc)} 只股票")
 
@@ -228,7 +227,7 @@ def main():
                 # 传 dates 走时序验证（规则第6条要求，禁止 random_split 降级）
                 dates = [d["date"] for d in training_data]
                 train_result = selector.train(df, dates=dates)
-                print(f"  ✅ 模型训练完成")
+                print("  ✅ 模型训练完成")
                 print(f"    准确率: {train_result.get('accuracy', 'N/A')}")
                 print(f"    F1: {train_result.get('f1', 'N/A')}")
                 print(f"    特征: {len(train_result.get('feature_names', []))}")

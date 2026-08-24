@@ -16,19 +16,22 @@
 import os
 import json
 import sys
-import numpy as np
+import logging
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 from src.data.database import StockDatabase, SUB_SCORE_DIMS
-from src.engine.factor_attribution import FactorAttribution, AttributionAggregator
+from src.engine.factor_attribution import FactorAttribution
 from src.engine.ml_selector import MLStockSelector, FactorOptimizer
+from src.engine.scorer import StockScorer
 
 
 RETRAIN_INTERVAL_DAYS = 7       # 每7天重训练一次
@@ -141,9 +144,16 @@ class FeedbackLoop:
         """
         if today is None:
             today = datetime.now().strftime("%Y-%m-%d")
-        # 取最近 60 天的推荐（覆盖 T+14 窗口），但只归因 trade_date <= today 的
+        # 取最近 60 天的推荐（覆盖 T+14 窗口），但只归因 trade_date <= today 的。
+        # 仅归因 mode='premarket' 行：因子快照产自盘前全量计算，午后行与盘前行
+        # 同票同日的因子几乎相同，混入会重复计数(午后表现通过 paper_trades 单独评估)。
+        # (旧逻辑按 (code,trade_date) 去重会随机保留一条——mode 维度引入后必须显式过滤)
         all_recs = self.db.get_recent_recommendations(days=365)
-        recs = [r for r in all_recs if r.get("trade_date", "") <= today]
+        recs = [
+            r for r in all_recs
+            if r.get("trade_date", "") <= today
+            and (r.get("mode") or "premarket") == "premarket"
+        ]
 
         count = 0
         # 一次取出已存在的归因记录，避免 N+1 查询
@@ -152,11 +162,22 @@ class FeedbackLoop:
             (r.get("code"), r.get("trade_date")) for r in existing
         }
 
+        # 收益窗口字段与 horizon 对应；显式 is not None 判断——
+        # 此前用 or 链，d14_return=0(有效值)会被误跳到下一窗口
+        horizon_fields = [
+            ("d14_return", 14), ("d10_return", 10), ("d5_return", 5),
+            ("d3_return", 3), ("d1_return", 1),
+        ]
+
         for rec in recs:
-            # 优先 T+14（主信号），fallback 到 d10/d5/d3/d1
-            actual_return = (rec.get("d14_return") or rec.get("d10_return")
-                             or rec.get("d5_return") or rec.get("d3_return")
-                             or rec.get("d1_return"))
+            actual_return = None
+            horizon = None
+            for field, h in horizon_fields:
+                v = rec.get(field)
+                if v is not None:
+                    actual_return = v
+                    horizon = h
+                    break
             if actual_return is None:
                 continue
             trade_date = rec.get("trade_date", "")
@@ -167,7 +188,7 @@ class FeedbackLoop:
             if not sub_scores:
                 continue
             rec["sub_scores"] = sub_scores
-            attr = FactorAttribution(rec, actual_return)
+            attr = FactorAttribution(rec, actual_return, horizon=horizon)
             attr_dict = attr.to_dict()
             self.db.save_attribution(
                 trade_date=attr_dict["trade_date"],
@@ -177,6 +198,7 @@ class FeedbackLoop:
                 actual_return=attr_dict["actual_return"],
                 factor_results=attr_dict["factor_results"],
                 is_failure=attr_dict["is_failure"],
+                return_horizon=horizon,
             )
             count += 1
         return count
@@ -245,6 +267,32 @@ class FeedbackLoop:
                         "decay": round(decay, 3),
                     }
 
+        # === 动态扩展正交化因子对 ===
+        # 静态 ORTHOGONALIZE_PAIRS 来自代码级共线分析(硬编码4对)，此处基于
+        # 近30天24维子评分截面补充检测：相关性>0.85 的新高相关对追加进
+        # StockScorer.ORTHOGONALIZE_PAIRS，次日 batch_normalize 生效。
+        # 阈值比 analyze_factor_correlation 默认0.7 更保守，避免误杀独立信息；
+        # 方向约定按因子名排序(target<-regressor)，保证可复现。
+        try:
+            corr_df = optimizer.analyze_factor_correlation(factor_data)
+            if corr_df is not None and not corr_df.empty:
+                existing_pairs = {frozenset(p) for p in StockScorer.ORTHOGONALIZE_PAIRS}
+                added = []
+                for _, row in corr_df.iterrows():
+                    if row["correlation"] < 0.85:
+                        continue
+                    pair = frozenset((row["factor1"], row["factor2"]))
+                    if len(pair) < 2 or pair in existing_pairs:
+                        continue
+                    a, b = sorted(pair)
+                    StockScorer.ORTHOGONALIZE_PAIRS.append((a, b))
+                    existing_pairs.add(pair)
+                    added.append(f"{a}<-{b}({row['correlation']:.2f})")
+                if added:
+                    logger.info("动态正交化新增 %d 对: %s", len(added), ", ".join(added))
+        except Exception as e:
+            logger.warning("动态正交化检测失败(不影响IC分析): %s", e)
+
         return {
             "status": "ok",
             "factors": {k: round(v, 3) for k, v in ic_all.items()},
@@ -308,6 +356,19 @@ class FeedbackLoop:
         latest_ic = self.db.get_latest_ic(days=14)
         changes = []
 
+        # 调权基准与生产 scorer 完全一致：config.yaml 静态先验 + DB 最新调权结果。
+        # 原实现直接读静态 config，DB 累积多次调权后 old_weight 失真、
+        # MAX_WEIGHT_CHANGE 相对错误基准做 clip → weight_history 审计链不可信
+        base_weights = dict(self.config.get("weights") or {})
+        try:
+            latest_db_weights = self.db.get_latest_weights()
+            if latest_db_weights:
+                for k, v in latest_db_weights.items():
+                    if k in base_weights:
+                        base_weights[k] = v
+        except Exception as e:
+            logger.warning("加载DB最新权重失败，退回config静态权重作为基准: %s", e)
+
         # 1) 时序衰减归因统计 + 连续失败检测
         factor_stats = {}
         factor_daily = defaultdict(list)
@@ -365,7 +426,7 @@ class FeedbackLoop:
             if consecutive_failures.get(factor, 0) >= 3:
                 penalty = min(penalty + 0.2, 0.7)
 
-            current_weight = (self.config.get("weights") or {}).get(factor, 0.05)
+            current_weight = base_weights.get(factor, 0.05)
             new_weight = round(max(current_weight * (1 - penalty), 0.005), 4)
             new_weight = max(new_weight, current_weight - MAX_WEIGHT_CHANGE)
             new_weight = round(new_weight, 4)
@@ -391,9 +452,8 @@ class FeedbackLoop:
             if factor_data is not None and not factor_data.empty and "future_return" in factor_data.columns:
                 opt_weights = optimizer.optimize_weights(factor_data, return_col="future_return")
                 if opt_weights:
-                    weights = self.config.get("weights") or {}
                     for name, opt_w in opt_weights.items():
-                        cur_w = weights.get(name, 0)
+                        cur_w = base_weights.get(name, 0)
                         if abs(opt_w - cur_w) > MAX_WEIGHT_CHANGE:
                             clip_w = cur_w + (MAX_WEIGHT_CHANGE if opt_w > cur_w else -MAX_WEIGHT_CHANGE)
                             changes.append({
@@ -407,8 +467,9 @@ class FeedbackLoop:
                                 today, name, cur_w, round(clip_w, 4),
                                 reason=changes[-1]["reason"],
                             )
-        except Exception:
-            pass
+        except Exception as e:
+            # IC优化调权失败不应中断归因惩罚调权的结果，但必须留痕便于排查
+            logger.warning("IC优化调权失败(跳过该步骤): %s", e)
 
         # 4) 归一化（仅更新内存中的 config 对象，不写回 config.yaml）
         # 规则 §6：config.yaml 是静态先验，不被反馈循环改写。
@@ -485,15 +546,23 @@ class FeedbackLoop:
 
         data_for_training = []
         for _, row in factor_data.iterrows():
+            code = row["stock_code"]
+            trade_date = row["trade_date"]
+            date_str = trade_date.strftime("%Y-%m-%d") if hasattr(trade_date, "strftime") else str(trade_date)
+            raw_factors = self.db.get_factor_snapshot_raw_factors(code, date_str)
+            if not raw_factors:
+                raw_factors = {dim: row[dim] for dim in factor_data.columns
+                               if dim not in ["trade_date", "stock_code", "future_return"]}
             data_for_training.append({
-                "date": row["trade_date"].strftime("%Y-%m-%d") if hasattr(row["trade_date"], "strftime") else str(row["trade_date"]),
-                "stock_code": row["stock_code"],
-                "factors": {dim: row[dim] for dim in factor_data.columns
-                           if dim not in ["trade_date", "stock_code", "future_return"]},
+                "date": date_str,
+                "stock_code": code,
+                "factors": raw_factors,
                 "future_return": row["future_return"],
             })
 
-        df = selector.prepare_training_data(data_for_training, min_return=0.01)
+        # min_return=1.0 即"涨幅>1%为正例"。future_return 来自 recommendations.dN_return
+        # （百分数口径），原传 0.01 实际阈值是 0.01%，几乎所有微涨都成了 positive
+        df = selector.prepare_training_data(data_for_training, min_return=1.0)
         if df.empty:
             return None
 

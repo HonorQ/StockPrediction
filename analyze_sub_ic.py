@@ -268,7 +268,7 @@ def generate_report(panel: pd.DataFrame,
     lines.append(f"> 生成时间：{now}")
     lines.append(f"> 数据范围：{date_min} ~ {date_max}（{n_days} 个交易日，{n_samples} 条样本）")
     lines.append(f"> 收益口径：路径 A —— factor_snapshots INNER JOIN recommendations.d3_return（T+{forward_window} 真实收盘价）")
-    lines.append(f"> IC 类型：日频截面 Rank IC（spearman），按 trade_date 分组后取均值；ICIR = mean(IC)/std(IC)")
+    lines.append("> IC 类型：日频截面 Rank IC（spearman），按 trade_date 分组后取均值；ICIR = mean(IC)/std(IC)")
     lines.append(f"> 阈值：|IC|>{IC_ATTENTION} 注意，>{IC_EFFECTIVE} 有效，>{IC_STRONG} 强；|ICIR|>{ICIR_USABLE} 可用，>{ICIR_EXCELLENT} 优秀")
     lines.append(f"> 每日截面最少样本数：{MIN_CROSS_SECTION}")
     lines.append("")

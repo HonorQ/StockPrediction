@@ -209,7 +209,8 @@ class ConceptMap:
                         "走强", "活跃", "拉升", "爆发", "创新高", "翻红", "连板", "反包", "修复", "高开"]
         _neg_default = ["利空", "下跌", "暴雷", "处罚", "减持", "跌停", "暴跌", "调查", "亏损", "立案",
                         "下挫", "重挫", "闪崩", "炸板", "回落", "出货", "退市", "暂停上市", "连续跌停",
-                        "st", "st", "st"]
+                        # A股风险标记恒为大写"ST"(如 ST股/*ST)，小写"st"永远匹配不到且会误伤英文单词
+                        "ST"]
         positive_kw = list(set(_pos_default + getattr(news_factor, 'positive_kw', [])))
         negative_kw = list(set(_neg_default + getattr(news_factor, 'negative_kw', [])))
 

@@ -2,8 +2,7 @@
 人气因子
 股吧人气排名、人气变化、粉丝占比
 """
-import pandas as pd
-from typing import Dict, List
+from typing import Dict
 
 
 class PopularityFactors:

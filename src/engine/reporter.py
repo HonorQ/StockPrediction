@@ -19,6 +19,31 @@ class ReportGenerator:
     # ------------------------------------------------------------------
     # 公共接口
     # ------------------------------------------------------------------
+    # 三档报告身份标注：明确"哪份报告才是买入依据"，消除多时点推荐的决策困惑
+    REPORT_ROLES = {
+        "research": {
+            "title_suffix": "· 盘前研究池",
+            "banner_title": "研究池说明",
+            "banner": ("本报告为 07:00 盘前全量因子计算产出的观察候选池，非买入依据。"
+                       "买入决策以 14:40 午后《尾盘最终决策版》为准。"),
+            "bg": "#eef2f6", "border": "#7a8ba3", "color": "#3f4c63",
+        },
+        "warning": {
+            "title_suffix": "· 盘中预警(非买入依据)",
+            "banner_title": "盘中预警",
+            "banner": ("09:25 盘中仅负责：崩盘清仓检测、不可交易标记(涨跌停)、高风险票预警。"
+                       "本报告不含推荐列表，买入决策以 14:40 午后《尾盘最终决策版》为准。"),
+            "bg": "#fdf3e0", "border": "#e0a800", "color": "#8a6d1a",
+        },
+        "final": {
+            "title_suffix": "· 尾盘最终决策版",
+            "banner_title": "最终决策",
+            "banner": ("本报告为 14:40 尾盘最终决策版：已经全天真实走势/主力资金流验证，"
+                       "是当日唯一的买入依据。请于 14:45-14:55 间完成下单。"),
+            "bg": "#e9f5ec", "border": "#3d9153", "color": "#25603a",
+        },
+    }
+
     def generate_report(
         self,
         recommendations: List[Dict],
@@ -30,13 +55,17 @@ class ReportGenerator:
         rotation_data: Dict = None,
         history_records: List[Dict] = None,
         intraday_note: str = None,
+        report_role: str = None,
     ) -> str:
         """生成完整HTML推荐报告
 
         Args:
             intraday_note: 盘中修正说明标记。设置后会在标题追加"（xxx修正版）"
                 并在头部插入黄色提示横幅。
+            report_role: 报告身份(research=盘前研究池/warning=盘中预警/final=尾盘最终决策)，
+                提供时覆盖标题后缀与横幅样式，明确各时点报告的决策地位。
         """
+        role = self.REPORT_ROLES.get(report_role) if report_role else None
         trade_cfg = trade_config or {}
         stop_loss_pct = trade_cfg.get("stop_loss_pct", -0.05)
         take_profit_pct = trade_cfg.get("take_profit_pct", 0.08)
@@ -44,9 +73,9 @@ class ReportGenerator:
         time_str = datetime.now().strftime("%H:%M")
 
         sections = []
-        sections.append(self._build_head(date_str, intraday_note))
-        sections.append(self._build_header(date_str, time_str, intraday_note))
-        sections.append(self._build_intraday_notice(intraday_note))
+        sections.append(self._build_head(date_str, intraday_note, role))
+        sections.append(self._build_header(date_str, time_str, intraday_note, role))
+        sections.append(self._build_intraday_notice(intraday_note, role))
         sections.append(self._build_market(market_overview))
         sections.append(self._build_global(global_markets))
         sections.append(self._build_sentiment(sentiment, rotation_data))
@@ -61,8 +90,12 @@ class ReportGenerator:
     # ------------------------------------------------------------------
     # 各段落构建
     # ------------------------------------------------------------------
-    def _build_head(self, date_str: str, intraday_note: str = None) -> str:
-        title_suffix = f"（{intraday_note}修正版）" if intraday_note else ""
+    def _build_head(self, date_str: str, intraday_note: str = None,
+                    role: dict = None) -> str:
+        if role:
+            title_suffix = f"（{role['title_suffix']}）"
+        else:
+            title_suffix = f"（{intraday_note}修正版）" if intraday_note else ""
         return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -193,8 +226,12 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
 <body>
 <div class="container">"""
 
-    def _build_header(self, date_str: str, time_str: str, intraday_note: str = None) -> str:
-        title_suffix = f"（{intraday_note}修正版）" if intraday_note else ""
+    def _build_header(self, date_str: str, time_str: str, intraday_note: str = None,
+                      role: dict = None) -> str:
+        if role:
+            title_suffix = f"（{role['title_suffix']}）"
+        else:
+            title_suffix = f"（{intraday_note}修正版）" if intraday_note else ""
         return f"""
 <div class="masthead">
   <div class="kicker">量化选股 · 每日晨报</div>
@@ -206,11 +243,15 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
   <span>{time_str} · 仅供参考</span>
 </div>"""
 
-    def _build_intraday_notice(self, intraday_note: str = None) -> str:
-        """盘中修正说明横幅（仅当 intraday_note 非空时返回内容）"""
+    def _build_intraday_notice(self, intraday_note: str = None,
+                               role: dict = None) -> str:
+        """报告身份横幅：report_role 提供时输出对应身份横幅，否则退回盘中修正说明"""
+        if role:
+            return f"""
+<div style="background:{role['bg']};border-left:3px solid {role['border']};padding:10px 16px;margin:14px 0;border-radius:2px;font-size:13px;color:{role['color']};">🧭 <b>{role['banner_title']}</b>: {role['banner']}</div>"""
         if not intraday_note:
             return ""
-        return f"""
+        return """
 <div style="background:#f6efe0;border-left:3px solid #e0a800;padding:10px 16px;margin:14px 0;border-radius:2px;font-size:13px;color:#6b5d3e;">⏱ <b>盘中修正说明</b>: 基于盘前深度分析(150+因子) + 集合竞价实时行情修正</div>"""
 
     def _build_market(self, market_overview: Dict) -> str:
@@ -312,23 +353,15 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
             if not items:
                 continue
             item_htmls = []
-            for n in items[:5]:
+            for n in items[:3]:
                 content = str(n.get("content", "")).strip()
                 title = str(n.get("title", "")).strip()
                 if not content:
                     continue
-                if len(content) > 80:
-                    # 完整全文始终保留在页面里，前 80 字做摘要 + details 展开
-                    snippet = content[:80] + "…"
-                    full = content
-                    item_htmls.append(f"""
+                snippet = content[:50] + "…" if len(content) > 50 else content
+                item_htmls.append(f"""
     <div class="news-item">
-      <div class="news-txt"><details><summary>{_html.escape(title) if title else ""}{_html.escape(snippet)}</summary><div class="news-full">{_html.escape(full)}</div></details></div>
-    </div>""")
-                else:
-                    item_htmls.append(f"""
-    <div class="news-item">
-      <div class="news-txt">{_html.escape(title) + " " if title else ""}{_html.escape(content)}</div>
+      <div class="news-txt">{_html.escape(title + " " + snippet) if title else _html.escape(snippet)}</div>
     </div>""")
             if item_htmls:
                 parts.append(f'<div class="news-section"><h3>{label}</h3>{"".join(item_htmls)}</div>')
@@ -460,59 +493,57 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
             moat_score = 0
         moat_level = str(bp.get("moat_level", "") or "")
         if moat_score >= 70:
-            reasons.append(("护城河深", f"{moat_level}（{moat_score:.0f}分）"))
+                reasons.append(("公司底子好", f"{moat_level}，护城河{moat_score:.0f}分"))
         elif moat_score >= 55:
-            reasons.append(("护城河稳健", f"{moat_level}（{moat_score:.0f}分）"))
-        elif moat_score >= 40:
-            reasons.append(("基本盘稳定", f"护城河 {moat_score:.0f} 分，行业地位中上"))
+            reasons.append(("公司底子不错", f"{moat_level}，护城河{moat_score:.0f}分"))
 
-        if bp.get("is_leader") or factors.get("is_leader"):
-            reasons.append(("行业龙头", "细分领域具备规模与话语权"))
+        is_leader = bp.get("is_leader") or factors.get("is_leader")
+        leader_score = 0
+        try:
+            leader_score = float(bp.get("moat_leader", 0) or 0)
+        except (ValueError, TypeError):
+            leader_score = 0
+        if is_leader and leader_score >= 75:
+            reasons.append(("行业老大", "这个领域它说了算"))
+        elif leader_score >= 60:
+            reasons.append(("行业前几名", "在同行里排名靠前"))
 
-        # 技术面
         if factors.get("macd_golden_cross"):
-            reasons.append(("MACD 金叉", "短期趋势转强信号确认"))
+            reasons.append(("技术指标转好", "MACD金叉，短期看涨"))
         if factors.get("ma_bullish"):
-            reasons.append(("均线多头", "短期均线多头排列，趋势向上"))
+            reasons.append(("均线向上", "股价站上均线，趋势向好"))
         if factors.get("breakout_20d_high"):
-            reasons.append(("突破新高", "放量突破 20 日高点，打开上方空间"))
+            reasons.append(("突破近期高点", "放量突破20日新高"))
         if factors.get("volume_price_up"):
-            reasons.append(("量价齐升", "成交量与价格同步放大，资金主动介入"))
+            reasons.append(("放量上涨", "量价齐升，有资金在买入"))
 
-        # 消息面
         news_score = factors.get("news_score", 0)
         if news_score > 75:
-            reasons.append(("消息面偏暖", f"新闻情绪 {news_score:.0f} 分，偏正面"))
+            reasons.append(("有利好消息", "市场消息面偏正面"))
 
-        # 情绪 / 人气
         hot_rank = factors.get("hot_rank", 0)
         if 0 < hot_rank <= 30:
-            reasons.append(("人气靠前", f"热股榜第 {hot_rank} 名"))
+            reasons.append(("市场关注度高", f"热股榜第{hot_rank}名，很多人在看"))
 
-        # 机构
         inst_count = factors.get("inst_holding_count", 0)
         if inst_count > 10:
-            reasons.append(("机构关注", f"{inst_count} 家机构持股"))
+            reasons.append(("机构看好", f"{inst_count}家机构持有"))
 
-        # 相对强弱
         rs_5d = factors.get("relative_strength_5d", 0)
         if rs_5d > 2:
-            reasons.append(("相对强势", "5 日相对强弱显著跑赢市场"))
+            reasons.append(("走势比大盘强", "近5天涨得比大盘好"))
 
-        # 超跌反弹 / 均值回归
         if factors.get("reversion_signal") in ("strong_buy", "buy"):
-            reasons.append(("超卖修复", "偏离均线超卖，存在均值回归动能"))
+            reasons.append(("跌多了会反弹", "之前跌太多，有反弹的可能"))
 
-        # 板块联动
         sector_signals = factors.get("sector_signals", []) or []
         for s in sector_signals[:1]:
             if "涨" in s:
-                reasons.append(("板块共振", s))
+                reasons.append(("板块在涨", s))
                 break
 
-        # 游资 / 涨停质量
         if factors.get("limit_quality") in ("连板", "一字板"):
-            reasons.append(("涨停质量高", "连板/一字板，资金一致性极强"))
+            reasons.append(("涨停质量高", "连续涨停，资金很看好"))
 
         if not reasons:
             return ""
@@ -565,10 +596,10 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
 
         return f"""
 <div class="biz-box">
-  <div class="op-title">业务画像 / 不可替代性</div>
+  <div class="op-title">板块信息</div>
   <div class="biz-line"><b>行业:</b> {industry} &nbsp; <b>赛道:</b> {theme_html}</div>
   <div class="biz-line">{concept_tags}</div>
-  <div class="biz-line"><span class="moat-val" style="color:{level_color};">{moat_score:.1f}</span>/100 &nbsp; <b style="color:{level_color};">{moat_level}</b>{sub_html}</div>
+  <div class="biz-line"><b>竞争力:</b> <span class="moat-val" style="color:{level_color};">{moat_score:.1f}</span>/100 &nbsp; <b style="color:{level_color};">{moat_level}</b>{sub_html}</div>
   <div class="biz-line">{moat_tags}</div>
 </div>"""
 

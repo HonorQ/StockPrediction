@@ -8,8 +8,7 @@
   - CPI变化（通胀指标）
 """
 import pandas as pd
-from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from typing import Dict, List
 
 
 class MacroEventDetector:
@@ -92,7 +91,7 @@ class MacroEventDetector:
                         "impact_score": 85,
                     })
 
-        except Exception as e:
+        except Exception:
             pass
 
         return events
@@ -150,7 +149,7 @@ class MacroEventDetector:
                     "severity": "low",
                     "direction": "negative",
                     "title": "M2增速连续下降（流动性收紧趋势）",
-                    "detail": f"最近3期M2增速持续下降",
+                    "detail": "最近3期M2增速持续下降",
                     "date": str(df.iloc[-1].get("月份", "")),
                     "affected_sectors": ["券商", "银行"],
                     "impact_score": 55,
@@ -215,7 +214,7 @@ class MacroEventDetector:
                         "severity": "medium",
                         "direction": "positive",
                         "title": f"PMI超预期{latest_val:.1f}(预期{forecast_val:.1f})",
-                        "detail": f"制造业PMI大幅超预期",
+                        "detail": "制造业PMI大幅超预期",
                         "date": str(pmi_df.iloc[-1].get("日期", "")),
                         "affected_sectors": ["制造业", "有色金属"],
                         "impact_score": 65,
@@ -226,7 +225,7 @@ class MacroEventDetector:
                         "severity": "medium",
                         "direction": "negative",
                         "title": f"PMI低于预期{latest_val:.1f}(预期{forecast_val:.1f})",
-                        "detail": f"制造业PMI大幅低于预期",
+                        "detail": "制造业PMI大幅低于预期",
                         "date": str(pmi_df.iloc[-1].get("日期", "")),
                         "affected_sectors": ["制造业", "有色金属"],
                         "impact_score": 60,
@@ -260,7 +259,7 @@ class MacroEventDetector:
                     "severity": "high",
                     "direction": "negative",
                     "title": f"CPI同比{latest_val:.1f}%（通缩风险）",
-                    "detail": f"居民消费价格指数同比负增长，经济面临通缩压力",
+                    "detail": "居民消费价格指数同比负增长，经济面临通缩压力",
                     "date": str(cpi_df.iloc[-1].get("日期", "")),
                     "affected_sectors": ["消费", "银行", "房地产"],
                     "impact_score": 70,
@@ -272,7 +271,7 @@ class MacroEventDetector:
                     "severity": "high",
                     "direction": "negative",
                     "title": f"CPI同比{latest_val:.1f}%（通胀压力）",
-                    "detail": f"居民消费价格指数同比高企，通胀压力加大",
+                    "detail": "居民消费价格指数同比高企，通胀压力加大",
                     "date": str(cpi_df.iloc[-1].get("日期", "")),
                     "affected_sectors": ["消费", "银行", "有色金属"],
                     "impact_score": 70,

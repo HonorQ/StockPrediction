@@ -18,7 +18,6 @@ logger = get_logger()
 import sys
 import os
 import time
-import json
 import argparse
 import numpy as np
 import pandas as pd
@@ -26,7 +25,7 @@ import baostock as bs
 import pickle
 import hashlib
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import List
 
 # K线本地缓存（避免重复 baostock 查询）
 KLINE_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "klines")
@@ -61,7 +60,7 @@ def fetch_kline(code, start, end, use_cache=True):
             cp = _kline_cache_path(code)
             with open(cp, "wb") as f:
                 pickle.dump(rows, f)
-        except Exception as e:
+        except Exception:
             import traceback; traceback.print_exc()
     return code, rows
 
@@ -371,11 +370,11 @@ def generate_report(db, phase_result, all_weight_changes, output_path):
         f.write(f"# 反馈训练报告 - {phase_result['phase']}\n\n")
         f.write(f"**阶段**: {dates[0]} → {dates[-1]} ({len(daily)} 天)\n\n")
 
-        f.write(f"## 阶段汇总\n\n")
+        f.write("## 阶段汇总\n\n")
         f.write(f"- 总推荐: {total_recs} 只\n\n")
-        f.write(f"## T+N 多窗口胜率\n\n")
-        f.write(f"| 窗口 | 有收益数 | 胜数 | 胜率 | 平均收益 |\n")
-        f.write(f"|---|---|---|---|---|\n")
+        f.write("## T+N 多窗口胜率\n\n")
+        f.write("| 窗口 | 有收益数 | 胜数 | 胜率 | 平均收益 |\n")
+        f.write("|---|---|---|---|---|\n")
         for name, n, w, avg in [("T+1", d1_n, d1_w, d1_avg),
                                  ("T+3", d3_n, d3_w, d3_avg),
                                  ("T+5", d5_n, d5_w, d5_avg),
@@ -386,38 +385,38 @@ def generate_report(db, phase_result, all_weight_changes, output_path):
             else:
                 f.write(f"| {name} | 0 | 0 | N/A | N/A |\n")
 
-        f.write(f"\n## 每日推荐明细\n\n")
+        f.write("\n## 每日推荐明细\n\n")
         f.write(f"| 日期 | 候选数 | Top{TOP_N}均分 | 收益更新 | 归因数 | 个股调权数 |\n")
-        f.write(f"|---|---|---|---|---|---|\n")
+        f.write("|---|---|---|---|---|---|\n")
         for d in daily:
             f.write(f"| {d['date']} | {d['n_candidates']} | {d['top_n_score']} | "
                     f"{d['n_returns_updated']} | {d['n_attributions']} | "
                     f"{d['n_stock_weight_changes']} |\n")
 
-        f.write(f"\n## 个股权重变化 Top10\n\n")
+        f.write("\n## 个股权重变化 Top10\n\n")
         if all_weight_changes:
             # 已按时间顺序累积，取变化幅度最大的 Top10
             sorted_changes = sorted(all_weight_changes, key=lambda x: abs(x.get("change", 0)), reverse=True)
-            f.write(f"| 股票 | 因子 | 旧权重 | 新权重 | 变化 | 原因 |\n")
-            f.write(f"|---|---|---|---|---|---|\n")
+            f.write("| 股票 | 因子 | 旧权重 | 新权重 | 变化 | 原因 |\n")
+            f.write("|---|---|---|---|---|---|\n")
             for w in sorted_changes[:10]:
                 f.write(f"| {w.get('code','')} | {w.get('factor','')} | "
                         f"{w.get('old',0):.4f} | {w.get('new',0):.4f} | "
                         f"{w.get('change',0):+.4f} | {w.get('reason','')} |\n")
         else:
-            f.write(f"无个股权重变化（可能样本数不足 MIN_SAMPLES=3）\n")
+            f.write("无个股权重变化（可能样本数不足 MIN_SAMPLES=3）\n")
 
-        f.write(f"\n## 因子归因统计\n\n")
+        f.write("\n## 因子归因统计\n\n")
         if attr_stats and attr_stats.get("factor_accuracy"):
-            f.write(f"| 因子 | 命中 | 失败 | 准确率 |\n")
-            f.write(f"|---|---|---|---|\n")
+            f.write("| 因子 | 命中 | 失败 | 准确率 |\n")
+            f.write("|---|---|---|---|\n")
             for factor, data in sorted(attr_stats["factor_accuracy"].items(),
                                        key=lambda x: x[1]["correct"] + x[1]["wrong"], reverse=True):
                 total = data["correct"] + data["wrong"]
                 acc = data["correct"] / total if total > 0 else 0
                 f.write(f"| {factor} | {data['correct']} | {data['wrong']} | {acc*100:.1f}% |\n")
         else:
-            f.write(f"无归因数据\n")
+            f.write("无归因数据\n")
 
     logger.info(f'  报告已生成: {output_path}')
 
@@ -542,7 +541,7 @@ def run_phase(dates, phase_name, db, stock_mgr, global_weights, all_weight_chang
             if shadow_model is not None:
                 ml_scores = []
                 for c in candidates:
-                    pred = shadow_model.predict(c.get("sub_scores", {}))
+                    pred = shadow_model.predict(c.get("factors", {}))
                     ml_scores.append({
                         "code": c["code"],
                         "name": c["name"],

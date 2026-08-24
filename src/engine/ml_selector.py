@@ -3,11 +3,9 @@
 """
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List
-from collections import defaultdict
 import os
-import sys
 import json
 import joblib
 
@@ -154,22 +152,54 @@ class MLStockSelector:
         }
 
     def prepare_training_data(
-        self, history_data: List[Dict], min_return: float = 0.01
+        self, history_data: List[Dict], min_return="auto"
     ) -> pd.DataFrame:
         """
         准备训练数据（不含横截面排名特征，避免训练/预测不一致）
-        标签直接取 history_data 中每项的 future_return 字段，与 min_return 比较。
+
+        标签 = future_return > 阈值。
+        - min_return="auto": 按当期收益分布自适应阈值 = max(0.5, median|future_return|)（百分数口径），
+          使正例标准随波动环境缩放（固定1%阈值在牛市几乎全是正例、熊市几乎全是负例，
+          标签分布随 regime 漂移会损害跨期稳定性）
+        - 传数值则按百分数口径使用（1.0 = 1%）
+        future_return 缺失/非数值的样本直接丢弃（此前会被静默打成 label=0，污染负类）。
         """
+        import logging
+
         if not history_data:
             return pd.DataFrame()
+
+        def _ret_of(item):
+            r = item.get("future_return")
+            try:
+                r = float(r)
+            except (TypeError, ValueError):
+                return None
+            return r if np.isfinite(r) else None
+
+        if isinstance(min_return, str):
+            all_rets = []
+            for item in history_data:
+                r = _ret_of(item)
+                if r is not None:
+                    all_rets.append(r)
+            if not all_rets:
+                return pd.DataFrame()
+            # 下限 0.5 个百分点（百分数口径），避免低波动期阈值过小
+            min_return = round(max(0.5, float(np.median(np.abs(all_rets)))), 4)
+            logging.getLogger(__name__).info(
+                "prepare_training_data: 自适应标签阈值 %.4f (有效收益样本 %d)",
+                min_return, len(all_rets),
+            )
 
         records = []
         for item in history_data:
             factors = item.get("factors", {})
-            future_return = item.get("future_return", 0)
-
+            r = _ret_of(item)
+            if r is None:
+                continue
             features = self._extract_features(factors, apply_keep=False).flatten()
-            label = 1 if future_return > min_return else 0
+            label = 1 if r > min_return else 0
             records.append({"features": features.tolist(), "label": label})
 
         if not records:
@@ -178,11 +208,14 @@ class MLStockSelector:
         df = pd.DataFrame(records)
         return df
 
-    def train(self, df: pd.DataFrame, dates: List[str] = None) -> Dict:
+    def train(self, df: pd.DataFrame, dates: List[str] = None,
+              label_horizon: int = 3) -> Dict:
         """
         训练集成模型（LightGBM + RandomForest）；超参随机搜索；时序验证
         df: columns = ["features", "label"]
         dates: 可选，与 df 行对应的日期字符串列表，用于时序拆分
+        label_horizon: 标签收益窗口(天)，用于切分点 embargo——T日标签用到T+N价格，
+            train/val、val/test 边界需跳过 N 个样本，防止训练段尾部标签偷看验证段价格
         """
         from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
@@ -208,41 +241,73 @@ class MLStockSelector:
         if dates is not None and len(dates) == len(df):
             order = np.argsort(dates)
             X = X[order]; y = y[order]
-            split_idx = int(len(X) * 0.8)
-            X_train, X_test = X[:split_idx], X[split_idx:]
-            y_train, y_test = y[:split_idx], y[split_idx:]
-            validation = "time_split"
+            n = len(X)
+            gap = max(int(label_horizon), 0)
+            if n >= 60:
+                # 三段时序切分: 前60%训练 / 中20%验证(超参选择) / 后20%测试(仅终评)
+                # 切分点跳过 label_horizon 个样本(embargo)，消除标签窗口重叠泄漏；
+                # 测试集不参与模型选择，metrics 中的 test 指标才是无偏估计
+                t_end = int(n * 0.6)
+                v_end = int(n * 0.8)
+                v_start, t_start = min(t_end + gap, v_end), min(v_end + gap, n)
+                X_train, X_val, X_test = X[:t_end], X[v_start:v_end], X[t_start:]
+                y_train, y_val, y_test = y[:t_end], y[v_start:v_end], y[t_start:]
+                if len(X_val) == 0 or len(X_test) == 0:
+                    # embargo 后验证/测试段为空(样本过少) → 放弃 embargo 保证可用性
+                    X_val, X_test = X[t_end:v_end], X[v_end:]
+                    y_val, y_test = y[t_end:v_end], y[v_end:]
+                validation = "time_split_3way"
+            else:
+                # 样本不足以三段: 退化为二段, 验证集与测试集共用
+                # (超参选择接触测试集, test 指标会轻微乐观, 已通过 validation 字段标注)
+                split_idx = int(n * 0.8)
+                X_train, X_test = X[:split_idx], X[split_idx:]
+                y_train, y_test = y[:split_idx], y[split_idx:]
+                X_val, y_val = X_test, y_test
+                validation = "time_split_2way"
         else:
-            # 降级分支：dates 缺失或长度不匹配。规则 §6 禁止 random_split 降级，
-            # 这里保留降级以保证可用性，但显式告警，便于排查调用方传参错误。
+            # 降级分支：dates 缺失或长度不匹配。
+            # 按行序切分(数据通常已按时间升序)替代原随机分层抽样——
+            # 时序样本相邻高度自相关，随机切分会让测试指标严重虚高；
+            # 同样加 label_horizon 的 embargo 防标签窗口重叠
             import logging
             logging.warning(
-                "ml_selector.train: dates 长度(%s)与 df(%s)不匹配，降级为随机分层抽样。"
-                "请检查调用方是否正确传入 dates，避免未来函数风险。",
+                "ml_selector.train: dates 缺失/长度不匹配(%s vs %s)，按行序切分降级。"
+                "请检查调用方是否正确传入 dates。",
                 len(dates) if dates is not None else "None", len(df)
             )
-            from sklearn.model_selection import train_test_split
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42, stratify=y
-            )
-            validation = "random_split"
+            n = len(X)
+            t_end = int(n * 0.6)
+            v_end = int(n * 0.8)
+            gap = max(int(label_horizon), 0)
+            v_start, t_start = min(t_end + gap, v_end), min(v_end + gap, n)
+            X_train, y_train = X[:t_end], y[:t_end]
+            X_val, y_val = X[v_start:v_end], y[v_start:v_end]
+            X_test, y_test = X[t_start:], y[t_start:]
+            if len(X_val) == 0 or len(X_test) == 0:
+                X_val, X_test = X[t_end:v_end], X[v_end:]
+                y_val, y_test = y[t_end:v_end], y[v_end:]
+            validation = "row_order_split_3way"
 
         best_lgb = None; best_rf = None; best_score = -1
 
-        # --- LightGBM 超参搜索（简单网格）---
+        # --- LightGBM 超参搜索（带正则化防过拟合）---
         try:
             import lightgbm as lgb
             param_grid = [
-                {"n_estimators": 200, "max_depth": 4, "num_leaves": 15, "learning_rate": 0.08, "min_child_samples": 10},
-                {"n_estimators": 300, "max_depth": 6, "num_leaves": 31, "learning_rate": 0.05, "min_child_samples": 20},
-                {"n_estimators": 400, "max_depth": 8, "num_leaves": 63, "learning_rate": 0.03, "min_child_samples": 30},
+                {"n_estimators": 100, "max_depth": 3, "num_leaves": 8, "learning_rate": 0.05, "min_child_samples": 20,
+                 "reg_alpha": 0.1, "reg_lambda": 0.1, "subsample": 0.8, "colsample_bytree": 0.8},
+                {"n_estimators": 150, "max_depth": 4, "num_leaves": 15, "learning_rate": 0.03, "min_child_samples": 30,
+                 "reg_alpha": 0.5, "reg_lambda": 0.5, "subsample": 0.7, "colsample_bytree": 0.7},
+                {"n_estimators": 200, "max_depth": 5, "num_leaves": 20, "learning_rate": 0.02, "min_child_samples": 40,
+                 "reg_alpha": 1.0, "reg_lambda": 1.0, "subsample": 0.6, "colsample_bytree": 0.6},
             ]
             for params in param_grid:
                 model = lgb.LGBMClassifier(
                     class_weight="balanced", random_state=42, verbose=-1, **params
                 )
                 model.fit(X_train, y_train)
-                val_score = accuracy_score(y_test, model.predict(X_test))
+                val_score = accuracy_score(y_val, model.predict(X_val))
                 if val_score > best_score:
                     best_score = val_score
                     best_lgb = model
@@ -251,18 +316,18 @@ class MLStockSelector:
         except ImportError:
             self.model = None
 
-        # --- RandomForest ---
+        # --- RandomForest（限制复杂度）---
         from sklearn.ensemble import RandomForestClassifier as RFC
         rf_params = [
-            {"n_estimators": 150, "max_depth": 6, "min_samples_leaf": 5},
-            {"n_estimators": 250, "max_depth": 10, "min_samples_leaf": 3},
-            {"n_estimators": 400, "max_depth": 14, "min_samples_leaf": 2},
+            {"n_estimators": 100, "max_depth": 4, "min_samples_leaf": 10},
+            {"n_estimators": 150, "max_depth": 6, "min_samples_leaf": 15},
+            {"n_estimators": 200, "max_depth": 8, "min_samples_leaf": 20},
         ]
         best_rf_score = -1
         for params in rf_params:
             model = RFC(class_weight="balanced", random_state=42, n_jobs=-1, **params)
             model.fit(X_train, y_train)
-            val_score = accuracy_score(y_test, model.predict(X_test))
+            val_score = accuracy_score(y_val, model.predict(X_val))
             if val_score > best_rf_score:
                 best_rf_score = val_score
                 best_rf = model
@@ -315,6 +380,7 @@ class MLStockSelector:
             "recall": round(recall, 3),
             "f1_score": round(f1, 3),
             "train_samples": len(X_train),
+            "val_samples": len(X_val),
             "test_samples": len(X_test),
             "top_features": [(name, round(imp, 4)) for name, imp in sorted_importance[:10]],
             "model_saved": self.model_path,
@@ -486,24 +552,35 @@ class FactorOptimizer:
     @staticmethod
     def _calc_forward_return(fetcher, code: str, trade_date: str,
                               forward_window: int = 3) -> float:
-        """计算未来N天的收益"""
+        """计算 trade_date 起 T+N 的真实收益。
+
+        此前实现取"最近N天K线"的 closes[0] 当入场价——对历史 trade_date 而言
+        锚点完全错位(算的是最近几天的收益而非该日起的远期收益)。
+        现按 trade_date 在K线中定位锚点行；拉取跨度按距今天数动态扩展。
+        """
         try:
-            from datetime import datetime, timedelta
             start = datetime.strptime(trade_date, "%Y-%m-%d")
-            future_days = forward_window + 5
-            history = fetcher.get_stock_history(code, days=future_days)
-            if history is None or history.empty or len(history) < forward_window + 1:
+            span = max((datetime.now() - start).days, forward_window)
+            history = fetcher.get_stock_history(code, days=span + forward_window + 10)
+            if history is None or history.empty:
                 return None
             close_col = "收盘" if "收盘" in history.columns else "close"
-            if close_col not in history.columns:
+            date_col = "日期" if "日期" in history.columns else "date"
+            if close_col not in history.columns or date_col not in history.columns:
                 return None
+
+            # 按 trade_date 定位锚点行，找不到精确匹配则放弃(避免用错误基准价)
+            mask = history[date_col].astype(str).str.startswith(trade_date)
+            if not mask.any():
+                return None
+            idx = int(mask.values.argmax())
             closes = history[close_col].values
-            if len(closes) < forward_window + 1:
+            if idx + forward_window >= len(closes):
                 return None
-            entry = closes[0]
+            entry = float(closes[idx])
             if entry <= 0:
                 return None
-            exit_val = closes[min(forward_window, len(closes) - 1)]
+            exit_val = float(closes[idx + forward_window])
             return (exit_val / entry - 1) * 100
         except Exception:
             return None
@@ -636,7 +713,7 @@ class ShadowMLModel:
 
 
 def train_shadow_ml(today: str, db=None, lookback_days: int = 90,
-                    horizon: int = 3, threshold: float = 0.01,
+                    horizon: int = 3, threshold: float = 1.0,
                     kc: Dict = None):
     """影子 ML 训练：从 factor_snapshots 加载数据，训练独立 LightGBM 模型。
 
@@ -645,7 +722,8 @@ def train_shadow_ml(today: str, db=None, lookback_days: int = 90,
         db: StockDatabase 实例，None 时自动创建
         lookback_days: 回溯天数
         horizon: 预测窗口（天）
-        threshold: 正例阈值
+        threshold: 正例阈值（百分数口径：1.0 = 涨幅>1% 为正例，
+                   与 recommendations.dN_return 单位一致）
         kc: K线缓存 dict {code: [(date, close, ...)]}，用于计算实际收益
 
     Returns:
@@ -744,7 +822,12 @@ def train_shadow_ml(today: str, db=None, lookback_days: int = 90,
 
 
 def _future_return_from_kline(krows, trade_date: str, horizon: int) -> float:
-    """从 K 线行列表计算未来 N 天的收益。"""
+    """从 K 线行列表计算未来 N 天的收益。
+
+    返回百分数口径 (如 2.5 表示 +2.5%)，与 recommendations.dN_return /
+    _calc_forward_return 一致。原实现返回小数，与 rec 表 fallback 的百分数
+    混用同一个 threshold=0.01 判断标签 → fallback 分支阈值实际是 0.01%。
+    """
     if not krows:
         return None
     idx = None
@@ -756,4 +839,6 @@ def _future_return_from_kline(krows, trade_date: str, horizon: int) -> float:
         return None
     cur_close = float(krows[idx][1])
     fut_close = float(krows[idx + horizon][1])
-    return (fut_close - cur_close) / cur_close
+    if cur_close <= 0:
+        return None
+    return (fut_close / cur_close - 1) * 100

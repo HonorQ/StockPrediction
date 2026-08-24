@@ -178,10 +178,16 @@ class TechnicalFactors:
     # ------------------------------------------------------------------
     def _breakout_high(self, period: int) -> float:
         """突破N日新高"""
+        # 数据不足 N+1 日时无法判断突破，返回 0（无信号）。
+        # 原写法 high=0 时 收盘价>=0 恒真 → 不足60日的股票"突破60日新高"批量假触发
+        if len(self.df) < period + 2:
+            return 0.0
         if period == 20:
-            high = self.high_20.iloc[-2] if len(self.high_20) > 1 else 0
+            high = self.high_20.iloc[-2]
         else:
-            high = self.df["最高"].rolling(period).max().iloc[-2] if len(self.df) > period else 0
+            high = self.df["最高"].rolling(period).max().iloc[-2]
+        if pd.isna(high):
+            return 0.0
         return 1.0 if self.df["收盘"].iloc[-1] >= high else 0.0
 
     # ------------------------------------------------------------------

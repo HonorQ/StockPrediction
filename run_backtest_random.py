@@ -7,7 +7,7 @@ setup_logging()
 logger = get_logger()
 
 import sys; sys.path.insert(0, '.'); sys.path.insert(0, 'src')
-import os, json, time, numpy as np, pandas as pd, baostock as bs
+import os, time, pandas as pd, baostock as bs
 import yaml, atexit, random
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed

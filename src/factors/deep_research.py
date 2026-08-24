@@ -4,7 +4,6 @@
 预测当前股票与历史模式的相似度，给出预测置信度
 """
 import pandas as pd
-import numpy as np
 from typing import Dict, List
 
 

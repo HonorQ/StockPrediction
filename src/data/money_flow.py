@@ -184,7 +184,9 @@ class MoneyFlowFetcher:
             if data:
                 df = pd.DataFrame(data)
                 logger.info(f'  ✅ 获取北向持股(东财API): {len(df)} 条')
-            return df
+                return df
+            # 空响应时 df 从未赋值，直接 return df 会抛 NameError 被 except 吞掉
+            return pd.DataFrame()
         except Exception as e:
             logger.info(f'  ⚠️ 获取北向持股失败: {e}')
             return pd.DataFrame()

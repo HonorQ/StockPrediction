@@ -240,8 +240,8 @@ def generate_report(df: pd.DataFrame, table: pd.DataFrame,
     lines.append("")
     lines.append(f"> 生成时间：{now}")
     lines.append(f"> 数据范围：{df['trade_date'].min()} ~ {df['trade_date'].max()}（{df['trade_date'].nunique()} 个交易日，{len(df)} 条样本）")
-    lines.append(f"> 收益口径：recommendations.d3_return（T+3 真实收盘价回看）")
-    lines.append(f"> 因子对象：factor_snapshots 24 维 sub_* 独立列")
+    lines.append("> 收益口径：recommendations.d3_return（T+3 真实收盘价回看）")
+    lines.append("> 因子对象：factor_snapshots 24 维 sub_* 独立列")
     lines.append(f"> 信号口径：sub_* > {BULLISH_THRESHOLD} 视为看多；d3_return > 0 记为命中")
     lines.append(f"> regime 来源：新数据用 premarket 落库值；旧数据回算数 {sum(backfilled.values())} 条"
                  f"（回算仅用 T-1 日指数数据 + MA20 趋势，sentiment 历史不可得已退化，见规则 §1）")

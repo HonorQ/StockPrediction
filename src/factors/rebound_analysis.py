@@ -3,8 +3,7 @@
 判断反弹是一日游还是持续修复，预判次日走势
 """
 import pandas as pd
-import numpy as np
-from typing import Dict, List
+from typing import Dict
 
 
 class ReboundSustainability:
@@ -244,13 +243,13 @@ class ReboundSustainability:
         dist_from_20d_high = (current / high_20 - 1) * 100
         dist_from_60d_high = (current / high_60 - 1) * 100
 
-        # 套牢盘压力大
-        if dist_from_20d_high < -5:
-            result["score_delta"] -= 8
-            result["risk_factors"].append(f"距20日高点{dist_from_20d_high:.1f}%（套牢盘重）")
-        elif dist_from_20d_high < -10:
+        # 套牢盘压力大（先判重度再判轻度：原 elif 顺序颠倒导致 <-10 重罚分支永不可达）
+        if dist_from_20d_high < -10:
             result["score_delta"] -= 12
             result["risk_factors"].append(f"距20日高点{dist_from_20d_high:.1f}%（套牢盘很重）")
+        elif dist_from_20d_high < -5:
+            result["score_delta"] -= 8
+            result["risk_factors"].append(f"距20日高点{dist_from_20d_high:.1f}%（套牢盘重）")
 
         if dist_from_60d_high < -15:
             result["score_delta"] -= 5

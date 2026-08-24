@@ -3,9 +3,10 @@ A股特色因子：融资融券、股东增减持、解禁风险、季节性效�
 """
 import logging
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict
+
+from src.utils.helpers import get_limit_pct
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +201,7 @@ class LockUpExpiryFactor:
             except:
                 pass
 
-        except Exception as e:
+        except Exception:
             pass
 
         return result
@@ -267,7 +268,7 @@ class LimitUpQualityFactor:
     def __init__(self):
         pass
 
-    def calculate(self, df: pd.DataFrame) -> Dict:
+    def calculate(self, df: pd.DataFrame, code: str = "", name: str = "") -> Dict:
         """计算涨停板质量因子"""
         result = {
             "limit_quality_score": 50,
@@ -287,7 +288,9 @@ class LimitUpQualityFactor:
         if pre_close <= 0:
             return result
 
-        limit_up_price = round(pre_close * 1.1, 2)
+        # 按板块口径计算涨跌停价（原硬编码1.1/0.9对20cm/30cm/ST全部误判）
+        limit_pct = get_limit_pct(code, name)
+        limit_up_price = round(pre_close * (1 + limit_pct / 100), 2)
 
         # 涨停检测
         if abs(close - limit_up_price) / limit_up_price < 0.005:
@@ -297,7 +300,7 @@ class LimitUpQualityFactor:
                 yesterday_change = yesterday.get("涨跌幅", 0)
 
                 # 连板检测
-                if yesterday_change > 9:
+                if yesterday_change > limit_pct - 1:
                     result["limit_quality"] = "连板"
                     result["limit_signals"].append("连板（强势）")
                     result["limit_quality_score"] = 80
@@ -317,7 +320,7 @@ class LimitUpQualityFactor:
                         result["limit_quality_score"] = 95
 
         # 跌停检测
-        limit_down_price = round(pre_close * 0.9, 2)
+        limit_down_price = round(pre_close * (1 - limit_pct / 100), 2)
         if abs(close - limit_down_price) / limit_down_price < 0.005:
             result["limit_quality"] = "跌停"
             result["limit_signals"].append("跌停（极弱）")

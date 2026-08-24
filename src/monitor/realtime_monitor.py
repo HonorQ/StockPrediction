@@ -6,8 +6,7 @@ logger = get_logger()
 
 import time
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List
 import sys
 import os
@@ -167,7 +166,7 @@ class RealtimeMonitor:
         from src.data.market_data import MarketDataFetcher
         fetcher = MarketDataFetcher()
 
-        logger.info(f'\n🔍 开始监控异动...')
+        logger.info('\n🔍 开始监控异动...')
         logger.info(f'监控时长: {duration}秒 | 检查间隔: {self.check_interval}秒')
         start_time = time.time()
         all_alerts = []

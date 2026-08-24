@@ -4,28 +4,27 @@ A股特色因子
 """
 import pandas as pd
 import numpy as np
-from typing import Dict, List
+from typing import Dict
+
+from src.utils.helpers import get_limit_pct
 
 
 class AShareCharacteristics:
     """A股特色因子"""
 
     def __init__(self):
-        # A股历史重要点位
-        self.key_levels = {
-            "3000": 3000,
-            "2800": 2800,
-            "3200": 3200,
-            "3500": 3500,
-        }
+        pass
 
-    def calculate_all(self, df: pd.DataFrame, market_sentiment: Dict = None) -> Dict:
+    def calculate_all(self, df: pd.DataFrame, market_sentiment: Dict = None,
+                      code: str = "", name: str = "") -> Dict:
         """
         计算A股特色因子
         df: 个股历史数据
         market_sentiment: 市场情绪数据
         """
         factors = {}
+
+        limit_pct = get_limit_pct(code, name)
 
         # 1. 均值回归因子（A股震荡市最有效）
         factors.update(self._mean_reversion_factor(df))
@@ -36,8 +35,8 @@ class AShareCharacteristics:
         # 3. 换手率异动（游资行为）
         factors.update(self._turnover_anomaly(df))
 
-        # 4. 涨跌停统计（情绪指标）
-        factors.update(self._limit_stats(df))
+        # 4. 涨跌停统计（情绪指标，按板块口径）
+        factors.update(self._limit_stats(df, limit_pct=limit_pct))
 
         # 5. 价格位置（3000点附近特殊处理）
         factors.update(self._price_position_factor(df))
@@ -159,10 +158,10 @@ class AShareCharacteristics:
 
         return factors
 
-    def _limit_stats(self, df: pd.DataFrame) -> Dict:
+    def _limit_stats(self, df: pd.DataFrame, limit_pct: float = 10.0) -> Dict:
         """
         涨跌停统计
-        A股特色：涨跌停板制度
+        A股特色：涨跌停板制度（按板块口径 10/20/30cm）
         """
         factors = {}
 
@@ -176,9 +175,10 @@ class AShareCharacteristics:
 
         recent_20 = change_pct.tail(20)
 
-        # 统计涨跌停次数
-        limit_up_count = sum(1 for x in recent_20 if x > 9.5)
-        limit_down_count = sum(1 for x in recent_20 if x < -9.5)
+        # 统计涨跌停次数（阈值 = 板块幅度 - 0.5，兼容盘中未精确封板）
+        limit_up_threshold = limit_pct - 0.5
+        limit_up_count = sum(1 for x in recent_20 if x > limit_up_threshold)
+        limit_down_count = sum(1 for x in recent_20 if x < -limit_up_threshold)
         large_up_count = sum(1 for x in recent_20 if x > 5)
         large_down_count = sum(1 for x in recent_20 if x < -5)
 
@@ -307,7 +307,8 @@ class HotMoneyTracker:
     def __init__(self):
         pass
 
-    def analyze(self, df: pd.DataFrame, hot_data: Dict = None) -> Dict:
+    def analyze(self, df: pd.DataFrame, hot_data: Dict = None,
+                code: str = "", name: str = "") -> Dict:
         """
         分析游资行为
         游资特点：追涨杀跌、快进快出、喜欢打板
@@ -320,6 +321,8 @@ class HotMoneyTracker:
         if df is None or df.empty or len(df) < 10:
             return result
 
+        limit_pct = get_limit_pct(code, name)
+
         close = df["收盘"] if "收盘" in df.columns else df["close"]
         volume = df["成交量"] if "成交量" in df.columns else df["volume"]
         change_pct = df["涨跌幅"] if "涨跌幅" in df.columns else df.get("pct_chg", pd.Series())
@@ -327,20 +330,20 @@ class HotMoneyTracker:
         score = 50
         signals = []
 
-        # 1. 连板检测（游资最爱）
+        # 1. 连板检测（游资最爱，按板块口径）
         if len(change_pct) >= 3:
             recent_3d = change_pct.tail(3)
-            if all(x > 9 for x in recent_3d):
+            if all(x > limit_pct - 1 for x in recent_3d):
                 signals.append("3连板（游资接力）")
                 score += 20
             elif all(x > 5 for x in recent_3d):
                 signals.append("3连阳（强势）")
                 score += 10
 
-        # 2. 涨停板敢死队模式
+        # 2. 涨停板敢死队模式（盘中冲高未封住：接近涨停但未到）
         if not change_pct.empty:
             today_change = change_pct.iloc[-1]
-            if 8 < today_change < 9.8:
+            if limit_pct - 2 < today_change < limit_pct - 0.2:
                 signals.append("涨停板博弈（敢死队模式）")
                 score += 15
 
