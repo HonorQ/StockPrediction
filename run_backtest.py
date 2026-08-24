@@ -11,7 +11,7 @@ logger = get_logger()
 
 import sys; sys.path.insert(0, '.'); sys.path.insert(0, 'src')
 import os, time, pandas as pd, baostock as bs
-import yaml, atexit
+import yaml, atexit, pickle, argparse
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.data.database import StockDatabase
@@ -45,6 +45,70 @@ def fetch_kline(code, start, end):
     rows = []
     while rs.next(): rows.append(rs.get_row_data())
     return code, rows
+
+
+def _to_float(v, default=0.0):
+    """baostock 停牌日返回空字符串/None，直接 float() 会崩"""
+    if v in (None, ""):
+        return default
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return default
+
+
+# K线本地缓存：全市场预取约需45分钟(baostock限流+断连)，落盘后重跑秒级恢复
+def _kline_cache_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "cache", f"bt_kline_{DATES[0]}_{DATES[-1]}.pkl")
+
+
+def _load_fetch1year_cache(codes):
+    """复用 scripts/fetch_1year_data.py 已落盘的按股K线缓存(cache/klines/*.pkl)。
+    文件名为 md5(code)[:16]，格式与 baostock 行一致。
+    仅采用完整覆盖 [PREFETCH_START, DATES[-1]] 的文件。"""
+    import hashlib
+    kdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "klines")
+    out = {}
+    for code in codes:
+        key = hashlib.md5(code.encode()).hexdigest()[:16]
+        p = os.path.join(kdir, f"1year_{key}.pkl")
+        if not os.path.exists(p):
+            continue
+        try:
+            with open(p, "rb") as f:
+                rows = pickle.load(f)
+            if rows and rows[0][0] <= PREFETCH_START and rows[-1][0] >= DATES[-1]:
+                out[code] = rows
+        except Exception:
+            continue
+    return out
+
+
+def prefetch_with_cache(stocks, start, end, refresh=False) -> dict:
+    path = _kline_cache_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if not refresh and os.path.exists(path):
+        with open(path, "rb") as f:
+            kc = pickle.load(f)
+        logger.info(f'  从缓存加载 {len(kc)} 只K线: {path}')
+        return kc
+
+    # 一级复用：fetch_1year_data 的按股缓存，只补拉缺失股票
+    local = _load_fetch1year_cache([c for c, _ in stocks]) if not refresh else {}
+    missing = [(c, n) for c, n in stocks if c not in local]
+    logger.info(f'  本地复用 {len(local)} 只, 需在线拉取 {len(missing)} 只')
+    fetched = prefetch(missing, start, end) if missing else {}
+
+    kc = dict(local)
+    for c, rows in fetched.items():
+        if rows:
+            kc[c] = rows
+
+    with open(path, "wb") as f:
+        pickle.dump(kc, f, protocol=pickle.HIGHEST_PROTOCOL)
+    logger.info(f'  K线已缓存({len(kc)} 只): {path}')
+    return kc
 
 def prefetch(stocks, start, end):
     data = {}
@@ -87,12 +151,29 @@ def factors(date, stocks, kc):
         rows = [r for r in raw if r[0] <= date]  # 仅取截至回测日的K线，无前视
         if len(rows) < 20: continue
         # baostock 字段顺序: date,close,volume,turn,pctChg,open,high,low
+        # 停牌日 volume/turn 等字段为空字符串 → 统一经 _to_float 防崩；
+        # 收盘价无效(停牌未开盘)的行整行跳过，避免0价格污染因子
+        parsed = []
+        for r in rows:
+            c = _to_float(r[1], default=0.0)
+            if c <= 0:
+                continue
+            parsed.append({
+                "date": r[0], "close": c,
+                "volume": _to_float(r[2]), "turn": _to_float(r[3]),
+                "pctChg": _to_float(r[4]),
+                "open": _to_float(r[5], default=c),
+                "high": _to_float(r[6], default=c),
+                "low": _to_float(r[7], default=c),
+            })
+        if len(parsed) < 20:
+            continue
         df = pd.DataFrame({
-            "开盘": [float(r[5]) for r in rows],
-            "最高": [float(r[6]) for r in rows],
-            "最低": [float(r[7]) for r in rows],
-            "收盘": [float(r[1]) for r in rows],
-            "成交量": [float(r[2]) or 0 for r in rows],
+            "开盘": [x["open"] for x in parsed],
+            "最高": [x["high"] for x in parsed],
+            "最低": [x["low"] for x in parsed],
+            "收盘": [x["close"] for x in parsed],
+            "成交量": [x["volume"] for x in parsed],
         })
         close = df["收盘"].values
         n = len(close)
@@ -129,10 +210,14 @@ def future_returns(kc):
         future = [r for r in rows if r[0] > date]
         for off, col in [(3,"d3_return"),(5,"d5_return"),(10,"d10_return")]:
             if len(future) >= off:
-                ep = float(future[off-1][1])
+                ep = _to_float(future[off-1][1])
                 if ep > 0: db.update_performance(date, code, **{col: round((ep/entry-1)*100, 2)})
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--refresh", action="store_true", help="强制重新预取K线(忽略本地缓存)")
+    args = ap.parse_args()
+
     logger.info('%s', '=' * 60)
     logger.info(f'  Walk-Forward: {DATES[0]} → {DATES[-1]} ({len(DATES)}天)')
     logger.info('%s', '=' * 60)
@@ -142,7 +227,7 @@ def main():
     logger.info(f'  候选: {len(all_stocks)} 只')
 
     logger.info(f'\n[2/4] 预取K线 ({PREFETCH_START}~{DATES[-1]})')
-    kc = prefetch(all_stocks, PREFETCH_START, DATES[-1])
+    kc = prefetch_with_cache(all_stocks, PREFETCH_START, DATES[-1], refresh=args.refresh)
 
     logger.info('\n[3/4] 逐日模拟')
     for i, d in enumerate(DATES):
