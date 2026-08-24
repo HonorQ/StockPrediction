@@ -11,7 +11,7 @@ logger = get_logger()
 
 import sys; sys.path.insert(0, '.'); sys.path.insert(0, 'src')
 import os, time, pandas as pd, baostock as bs
-import yaml, atexit, pickle, argparse
+import yaml, atexit, pickle, argparse, json
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.data.database import StockDatabase
@@ -66,11 +66,23 @@ def _kline_cache_path():
 def _load_fetch1year_cache(codes):
     """复用 scripts/fetch_1year_data.py 已落盘的按股K线缓存(cache/klines/*.pkl)。
     文件名为 md5(code)[:16]，格式与 baostock 行一致。
-    仅采用完整覆盖 [PREFETCH_START, DATES[-1]] 的文件。"""
+    仅采用完整覆盖 [PREFETCH_START, DATES[-1]] 的文件。
+    code→hash 映射优先读 _code_index.json(由反查工具生成)，否则现场计算。"""
     import hashlib
     kdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "klines")
+    index_path = os.path.join(kdir, "_code_index.json")
+    known_codes = None
+    if os.path.exists(index_path):
+        try:
+            with open(index_path, "r", encoding="utf-8") as f:
+                known_codes = set(json.load(f))
+        except Exception:
+            known_codes = None
+
     out = {}
     for code in codes:
+        if known_codes is not None and code not in known_codes:
+            continue
         key = hashlib.md5(code.encode()).hexdigest()[:16]
         p = os.path.join(kdir, f"1year_{key}.pkl")
         if not os.path.exists(p):
@@ -104,6 +116,11 @@ def prefetch_with_cache(stocks, start, end, refresh=False) -> dict:
     for c, rows in fetched.items():
         if rows:
             kc[c] = rows
+
+    if not kc:
+        # 全部拉取失败(如 baostock 限流)：不落盘坏缓存，下次直接重试
+        logger.info('  ⚠️ 未获得任何K线数据，跳过缓存落盘')
+        return kc
 
     with open(path, "wb") as f:
         pickle.dump(kc, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -208,10 +225,25 @@ def future_returns(kc):
         entry = rec.get("current_price", 0)
         if entry <= 0: continue
         future = [r for r in rows if r[0] > date]
-        for off, col in [(3,"d3_return"),(5,"d5_return"),(10,"d10_return")]:
+        # update_performance 的关键字是 d3/d5/d10(非列名 dN_return)
+        for off, kw in [(3, "d3"), (5, "d5"), (10, "d10")]:
             if len(future) >= off:
                 ep = _to_float(future[off-1][1])
-                if ep > 0: db.update_performance(date, code, **{col: round((ep/entry-1)*100, 2)})
+                if ep > 0: db.update_performance(date, code, **{kw: round((ep/entry-1)*100, 2)})
+
+def _load_local_stock_list():
+    """baostock 限流时的兜底：读取反查工具生成的本地缓存股票清单"""
+    idx = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "cache", "klines", "_code_index.json")
+    if not os.path.exists(idx):
+        return []
+    try:
+        with open(idx, "r", encoding="utf-8") as f:
+            codes = json.load(f)
+        return [(c, "") for c in codes]
+    except Exception:
+        return []
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -224,6 +256,13 @@ def main():
 
     logger.info('\n[1/4] 获取股票名单')
     all_stocks = get_stocks(DATES[-1])
+    if not all_stocks:
+        local = _load_local_stock_list()
+        if local:
+            logger.info(f'  ⚠️ baostock 名单不可用，回退本地K线缓存清单: {len(local)} 只')
+            all_stocks = local
+    if not all_stocks:
+        raise SystemExit('无法获取股票名单(baostock不可用且无本地缓存)，中止')
     logger.info(f'  候选: {len(all_stocks)} 只')
 
     logger.info(f'\n[2/4] 预取K线 ({PREFETCH_START}~{DATES[-1]})')
