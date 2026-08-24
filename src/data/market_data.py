@@ -58,10 +58,30 @@ class _BaostockConnection:
 class MarketDataFetcher:
     """行情数据获取器"""
 
+    # 内存缓存有效期(秒)：原实现进程内永不刷新，盘中重复请求拿到陈旧K线。
+    # 盘前任务单次运行影响小，但常驻的盘中监控/午后重算必须感知数据老化
+    CACHE_TTL = 300
+
     def __init__(self):
         self._cache: Dict[str, pd.DataFrame] = {}
+        self._cache_ts: Dict[str, float] = {}
         self._warned_bs = False
         self._industry_map: Optional[Dict[str, str]] = None
+
+    def _cache_get(self, key: str):
+        """带 TTL 的缓存读取，过期返回 None"""
+        import time as _time
+        ts = self._cache_ts.get(key)
+        if ts is not None and _time.time() - ts > self.CACHE_TTL:
+            self._cache.pop(key, None)
+            self._cache_ts.pop(key, None)
+            return None
+        return self._cache.get(key)
+
+    def _cache_put(self, key: str, value):
+        import time as _time
+        self._cache[key] = value
+        self._cache_ts[key] = _time.time()
 
     def get_industry_map(self, force_refresh: bool = False) -> Dict[str, str]:
         """获取 code -> industry 映射。
@@ -232,7 +252,9 @@ class MarketDataFetcher:
         """
         cache_key = "a_spot"
         if cache_key in self._cache:
-            return self._cache[cache_key]
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached
 
         # 主源：东财（带重试+代理轮换）
         try:
@@ -243,7 +265,7 @@ class MarketDataFetcher:
             if df is not None:
                 df = df.rename(columns={"序号": "idx"})
                 df = self._validate_and_normalize(df)
-                self._cache[cache_key] = df
+                self._cache_put(cache_key, df)
                 logger.info(f'  ✅ 获取A股实时行情(东财): {len(df)} 只')
                 return df
         except Exception as e:
@@ -257,7 +279,7 @@ class MarketDataFetcher:
             missing = self._REQUIRED_COLS - set(df.columns)
             if missing:
                 df = self._batch_supplement_market_cap(df)
-            self._cache[cache_key] = df
+            self._cache_put(cache_key, df)
             logger.info(f'  ✅ 获取A股实时行情(新浪): {len(df)} 只')
             return df
         except Exception as e:
@@ -426,7 +448,9 @@ class MarketDataFetcher:
 
         cache_key = f"hist_{stock_code}"
         if cache_key in self._cache:
-            return self._cache[cache_key]
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached
 
         clean_code = re.sub(r'^(sh|sz|bj|SH|SZ|BJ)', '', stock_code)
         clean_code = clean_code.replace(".", "")
@@ -449,13 +473,13 @@ class MarketDataFetcher:
                 host, tx_symbol, start, end, lookback, days
             )
             if df is not None and not df.empty:
-                self._cache[cache_key] = df
+                self._cache_put(cache_key, df)
                 return df
 
         # === 备选: 新浪K线 ===
         df = self._fetch_sina_kline(tx_symbol, days)
         if df is not None and not df.empty:
-            self._cache[cache_key] = df
+            self._cache_put(cache_key, df)
             return df
 
         # === 备选: baostock（带超时，复用进程级连接）===
@@ -490,7 +514,7 @@ class MarketDataFetcher:
                 for col in ["开盘", "最高", "最低", "收盘", "成交量", "成交额", "换手率", "涨跌幅"]:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
                 df = df.tail(days).reset_index(drop=True)
-                self._cache[cache_key] = df
+                self._cache_put(cache_key, df)
                 return df
         except Exception as e:
             if not self._warned_bs:
@@ -551,12 +575,27 @@ class MarketDataFetcher:
             if not records:
                 return None
             df = pd.DataFrame(records)
-            df["换手率"] = 0.0
+            # 腾讯日K接口无换手率字段：置 NaN 而非硬编码 0——
+            # 0 会被下游(chip筹码衰减/换手异动)当作真实"零换手"，NaN 则走降级路径
+            df["换手率"] = float("nan")
+            self._warn_no_turnover()
             df["涨跌幅"] = df["收盘"].pct_change().fillna(0) * 100
             return df.tail(days).reset_index(drop=True)
         except Exception as e:
             logger.warning("腾讯K线(%s)失败: %s", host, e)
             return None
+
+    _turnover_warned = False
+
+    @classmethod
+    def _warn_no_turnover(cls):
+        """备源缺换手率仅告警一次，避免刷屏"""
+        if not cls._turnover_warned:
+            cls._turnover_warned = True
+            logger.warning(
+                "K线备源(腾讯/新浪)无换手率字段，chip筹码衰减/换手异动因子将降级"
+                "(NaN按无衰减处理)。东财主源恢复后自动消除"
+            )
 
     def _fetch_sina_kline(self, tx_symbol: str, days: int) -> Optional[pd.DataFrame]:
         """新浪日K线备用源（quotes.sina.cn，免费稳定）。
@@ -595,12 +634,26 @@ class MarketDataFetcher:
             if not records:
                 return None
             df = pd.DataFrame(records)
-            df["换手率"] = 0.0
+            # 新浪K线无换手率字段：同腾讯源处理
+            df["换手率"] = float("nan")
+            self._warn_no_turnover()
             df["涨跌幅"] = df["收盘"].pct_change().fillna(0) * 100
             return df.tail(days).reset_index(drop=True)
         except Exception as e:
             logger.warning("新浪K线(%s)失败: %s", tx_symbol, e)
             return None
+
+    _turnover_warned = False
+
+    @classmethod
+    def _warn_no_turnover(cls):
+        """备源缺换手率仅告警一次，避免刷屏"""
+        if not cls._turnover_warned:
+            cls._turnover_warned = True
+            logger.warning(
+                "K线备源(腾讯/新浪)无换手率字段，chip筹码衰减/换手异动因子将降级"
+                "(NaN按无衰减处理)。东财主源恢复后自动消除"
+            )
 
     @staticmethod
     def _extract_tencent_value(field, default: float = 0.0) -> float:
@@ -658,8 +711,9 @@ class MarketDataFetcher:
         美元指数、美元兑人民币）返回 price='—'，避免显示误导性的 0.00%。
         """
         cache_key = "global_summary"
-        if cache_key in self._cache:
-            return self._filter_global(self._cache[cache_key], config_markets)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return self._filter_global(cached, config_markets)
 
         all_data: Dict[str, Dict] = {}
         needed = {}
@@ -674,7 +728,7 @@ class MarketDataFetcher:
                 name = needed[tc]
                 all_data[name] = {"name": name, "price": price, "change": pct, "available": True}
 
-        self._cache[cache_key] = all_data
+        self._cache_put(cache_key, all_data)
         return self._filter_global(all_data, config_markets)
 
     @staticmethod

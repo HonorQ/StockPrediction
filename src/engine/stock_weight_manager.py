@@ -28,6 +28,8 @@ from src.data.market_data import MarketDataFetcher
 
 
 MIN_SAMPLES = 5           # 单股单因子最少归因样本数才调权（低于此阈值统计噪声过大，与正向强化门槛一致）
+MIN_WEIGHT_FLOOR = 0.005  # 单因子权重下限：防止连续失败×0.5 把权重压到趋近0后永久"死亡"
+MAX_WEIGHT_STEP = 0.01    # 触底恢复单次最大回升幅度
 
 # 24 维因子完整列表（与 StockScorer.get_sub_scores 一致）
 ALL_FACTORS = [
@@ -244,16 +246,25 @@ class StockWeightManager:
             reason = ""
 
             # 调整规则（升权门槛比降权更严格，防止小样本虚高 accuracy 导致权重只升不降）
+            # 降权带下限 MIN_WEIGHT_FLOOR：原实现连续 wrong≥0.5 每次×0.5 无下限，
+            # 多次迭代后权重趋近0，而升权需 accuracy>75%+净胜≥3——低权重因子
+            # 参与评分的变化极小很难积累净胜，事实上永久"死亡"且无恢复通道
             if wrong_rate >= 0.5:
-                new_w = old_w * 0.5
+                new_w = max(old_w * 0.5, MIN_WEIGHT_FLOOR)
                 reason = f"wrong_rate={wrong_rate:.0%} (samples={total_pred})"
             elif wrong_rate >= 0.3 and accuracy < 0.4:
-                new_w = old_w * 0.7
+                new_w = max(old_w * 0.7, MIN_WEIGHT_FLOOR)
                 reason = f"wrong_rate={wrong_rate:.0%} accuracy={accuracy:.0%}"
             elif accuracy > 0.75 and total_pred >= 10 and (correct - wrong) >= 3:
                 # 升权要求：accuracy>75% + 样本≥10 + 净胜数≥3（防止 6对1错=86% 这种小样本虚高）
-                new_w = old_w * 1.1
-                reason = f"accuracy={accuracy:.0%} (samples={total_pred}, net_wins={int(correct-wrong)})"
+                # 恢复通道：已触底的因子只需略低的门槛即可回升，避免永久死亡
+                if old_w <= MIN_WEIGHT_FLOOR * 1.01:
+                    if accuracy > 0.65 and total_pred >= 8:
+                        new_w = min(old_w * 1.5, old_w + MAX_WEIGHT_STEP)
+                        reason = f"floor_recovery: accuracy={accuracy:.0%} (samples={total_pred})"
+                else:
+                    new_w = old_w * 1.1
+                    reason = f"accuracy={accuracy:.0%} (samples={total_pred}, net_wins={int(correct-wrong)})"
 
             if abs(new_w - old_w) < 1e-6:
                 continue
@@ -377,16 +388,12 @@ class StockWeightManager:
                 wrong_rate = wrong / total_pred if total_pred > 0 else 0
                 old_w = current_weights[factor]
                 new_w = old_w
-                reason = ""
                 if wrong_rate >= 0.5:
                     new_w = old_w * 0.5
-                    reason = f"sector wrong_rate={wrong_rate:.0%} (samples={total_pred})"
                 elif wrong_rate >= 0.3 and accuracy < 0.4:
                     new_w = old_w * 0.7
-                    reason = f"sector wrong_rate={wrong_rate:.0%} accuracy={accuracy:.0%}"
                 elif accuracy > 0.7 and total_pred >= 5:
                     new_w = old_w * 1.1
-                    reason = f"sector accuracy={accuracy:.0%} (samples={total_pred})"
                 if abs(new_w - old_w) < 1e-6:
                     continue
                 new_weights[factor] = new_w

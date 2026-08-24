@@ -389,6 +389,25 @@ class StockDatabase:
             if "regime" not in rec_cols:
                 conn.execute("ALTER TABLE recommendations ADD COLUMN regime TEXT")
 
+            # (trade_date, code, mode) 唯一约束：save_recommendation 的
+            # SELECT-then-INSERT 模拟 upsert 在并发下有竞态(双 INSERT 重复行)，
+            # 唯一索引兜底 + INSERT OR IGNORE 保证原子性。
+            # 已有重复数据时创建会失败——先去重再建索引
+            dup = conn.execute("""
+                SELECT COUNT(*) FROM (
+                    SELECT trade_date, code, mode FROM recommendations
+                    GROUP BY trade_date, code, mode HAVING COUNT(*) > 1
+                )""").fetchone()[0]
+            if dup == 0:
+                conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+                    uq_rec_date_code_mode ON recommendations(trade_date, code, mode)""")
+
+            # factor_attribution 补 code 索引：get_recent_attribution_for_stock
+            # 按 code+trade_date 查询，此前只有 date/failure 索引 → 全表扫描
+            attr_idx = {row[1] for row in conn.execute("PRAGMA index_list(factor_attribution)").fetchall()}
+            if "idx_attr_code" not in attr_idx:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_attr_code ON factor_attribution(code)")
+
     def save_recommendation(self, trade_date: str, code: str, name: str,
                             score: float, price: float, rank: int = 1,
                             mode: str = "premarket", factors: dict = None,
@@ -417,8 +436,9 @@ class StockDatabase:
                      regime, trade_date, code, mode)
                 )
             else:
+                # OR IGNORE：并发下唯一索引兜底，冲突行由后续 UPDATE 路径处理
                 conn.execute(
-                    """INSERT INTO recommendations
+                    """INSERT OR IGNORE INTO recommendations
                        (trade_date, code, name, score, current_price, rank, mode, factors, regime)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (trade_date, code, name, score, price, rank, mode,
@@ -869,20 +889,26 @@ class StockDatabase:
             ).fetchall()
         if not rows:
             return {"total": 0}
-        returns = [r[0] or 0 for r in rows]
-        pnls = [r[1] or 0 for r in rows]
-        wins = [r for r in returns if r > 0]
-        losses = [r for r in returns if r <= 0]
+        # NULL 收益(数据缺失/未回填)不能当 0 计入胜率分母——
+        # 原实现 r[0] or 0 把 NULL 混入统计，胜率/均值口径失真
+        valid = [(r[0], r[1], r[2], r[3]) for r in rows if r[0] is not None]
+        null_count = len(rows) - len(valid)
+        returns = [r[0] for r in valid]
+        pnls = [r[1] for r in valid]
+        wins = [v for v in returns if v > 0]
+        losses = [v for v in returns if v <= 0]
         reasons = {}
         for r in rows:
             reasons[r[2] or "unknown"] = reasons.get(r[2] or "unknown", 0) + 1
         avg_hold = sum(r[3] or 0 for r in rows) / len(rows) if rows else 0
         return {
             "total": len(rows),
+            "valid_count": len(valid),
+            "null_return_count": null_count,
             "win_count": len(wins),
             "lose_count": len(losses),
-            "win_rate": round(len(wins) / len(rows) * 100, 2) if rows else 0,
-            "avg_return": round(sum(returns) / len(returns), 2) if returns else 0,
+            "win_rate": round(len(wins) / len(valid) * 100, 2) if valid else 0,
+            "avg_return": round(sum(returns) / len(valid), 2) if valid else 0,
             "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
             "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
             "total_pnl": round(sum(pnls), 2),

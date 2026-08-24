@@ -318,6 +318,11 @@ class NewsFetcher:
 
     @staticmethod
     def _extract_stock_codes(content: str) -> List[str]:
-        """从文本中提取A股股票代码"""
-        codes = re.findall(r"\b[036]\d{5}\b", content)
+        """从文本中提取A股股票代码。
+
+        \\b 词边界在中文语境失效：中文与数字同属 \\w，"股票代码600519今天大涨"
+        中 600519 两侧无词边界 → 永远提取不到。改用环视断言：
+        前后都不能是数字/字母（中文、标点、行首尾均允许）。
+        """
+        codes = re.findall(r"(?<![0-9A-Za-z])([036]\d{5})(?![0-9A-Za-z])", content)
         return list(set(codes))

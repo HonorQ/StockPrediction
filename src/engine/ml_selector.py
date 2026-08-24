@@ -222,22 +222,6 @@ class MLStockSelector:
         X = np.array(df["features"].tolist())
         y = np.array(df["label"].tolist())
 
-        # 常量特征剔除：剔除方差为0的列（反馈训练数据中大量特征恒为50，保留会浪费模型容量/过拟合）
-        self._keep_index = None
-        if X.ndim == 2 and X.shape[1] > 1:
-            col_std = X.std(axis=0)
-            keep = np.where(col_std > 1e-8)[0]
-            if len(keep) < X.shape[1]:
-                self._keep_index = keep.tolist()
-                import logging
-                logging.getLogger(__name__).warning(
-                    "ML 常量特征剔除: %d -> %d (保留 %.0f%%)",
-                    X.shape[1], len(keep), len(keep) / X.shape[1] * 100,
-                )
-                X = X[:, self._keep_index]
-                if self.feature_names:
-                    self.feature_names = [self.feature_names[i] for i in self._keep_index]
-
         if dates is not None and len(dates) == len(df):
             order = np.argsort(dates)
             X = X[order]; y = y[order]
@@ -289,7 +273,36 @@ class MLStockSelector:
                 y_val, y_test = y[t_end:v_end], y[v_end:]
             validation = "row_order_split_3way"
 
+        # 常量特征剔除：基于【训练段】方差决定保留哪些列。
+        # 原实现在切分前用全量X(含测试段)方差——测试段信息轻微泄漏进特征选择；
+        # 反馈训练数据中大量特征恒为50，保留会浪费模型容量/过拟合
+        self._keep_index = None
+        if X_train.ndim == 2 and X_train.shape[1] > 1:
+            col_std = X_train.std(axis=0)
+            keep = np.where(col_std > 1e-8)[0]
+            if len(keep) < X.shape[1]:
+                self._keep_index = keep.tolist()
+                import logging
+                logging.getLogger(__name__).warning(
+                    "ML 常量特征剔除(仅按训练段): %d -> %d (保留 %.0f%%)",
+                    X.shape[1], len(keep), len(keep) / X.shape[1] * 100,
+                )
+                X_train = X_train[:, self._keep_index]
+                X_val = X_val[:, self._keep_index]
+                X_test = X_test[:, self._keep_index]
+                if self.feature_names:
+                    self.feature_names = [self.feature_names[i] for i in self._keep_index]
+
         best_lgb = None; best_rf = None; best_score = -1
+
+        def _val_auc(model):
+            """验证集 AUC 选模：class_weight=balanced 说明类别不平衡，
+            accuracy 在多数类上虚高；AUC 对阈值不敏感更能反映排序能力"""
+            from sklearn.metrics import roc_auc_score
+            proba = model.predict_proba(X_val)[:, 1]
+            if len(set(y_val)) < 2:
+                return accuracy_score(y_val, model.predict(X_val))
+            return roc_auc_score(y_val, proba)
 
         # --- LightGBM 超参搜索（带正则化防过拟合）---
         try:
@@ -307,7 +320,7 @@ class MLStockSelector:
                     class_weight="balanced", random_state=42, verbose=-1, **params
                 )
                 model.fit(X_train, y_train)
-                val_score = accuracy_score(y_val, model.predict(X_val))
+                val_score = _val_auc(model)
                 if val_score > best_score:
                     best_score = val_score
                     best_lgb = model
@@ -327,7 +340,7 @@ class MLStockSelector:
         for params in rf_params:
             model = RFC(class_weight="balanced", random_state=42, n_jobs=-1, **params)
             model.fit(X_train, y_train)
-            val_score = accuracy_score(y_val, model.predict(X_val))
+            val_score = _val_auc(model)
             if val_score > best_rf_score:
                 best_rf_score = val_score
                 best_rf = model
@@ -361,19 +374,8 @@ class MLStockSelector:
             self.feature_importance.items(), key=lambda x: x[1], reverse=True
         )
 
-        # --- 保存 ---
-        joblib.dump(self.model, self.model_path)
-        if self.model_aux:
-            joblib.dump(self.model_aux, self.model_aux_path)
-        with open(self.model_meta_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "feature_names": self.feature_names,
-                "model_type": self.model_type,
-                "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "keep_index": self._keep_index,
-            }, f, ensure_ascii=False, indent=2)
-
-        return {
+        # --- 保存（版本化：保留最近 N 版，模型劣化时可回滚对比）---
+        metrics = {
             "accuracy": round(accuracy, 3),
             "train_accuracy": round(train_accuracy, 3),
             "precision": round(precision, 3),
@@ -387,6 +389,51 @@ class MLStockSelector:
             "model_type": self.model_type,
             "validation": validation,
         }
+        self._save_model_versioned(metrics)
+        return metrics
+
+    MODEL_HISTORY_KEEP = 5
+
+    def _save_model_versioned(self, metrics: Dict):
+        """保存当前模型并归档历史版本(models/history/)，
+        meta.json 记录训练指标供劣化诊断与回滚对比。"""
+        import glob
+        import shutil
+        # 归档上一版
+        if os.path.exists(self.model_path):
+            hist_dir = os.path.join(os.path.dirname(self.model_path), "history")
+            os.makedirs(hist_dir, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            shutil.copy2(self.model_path, os.path.join(hist_dir, f"stock_selector_{stamp}.pkl"))
+            old_meta = self.model_meta_path
+            meta_dst = os.path.join(hist_dir, f"stock_selector_{stamp}.meta.json")
+            if os.path.exists(old_meta):
+                shutil.copy2(old_meta, meta_dst)
+            else:
+                json.dump(metrics, open(meta_dst, "w", encoding="utf-8"),
+                          ensure_ascii=False, indent=2, default=str)
+            # 只保留最近 N 版
+            archives = sorted(glob.glob(os.path.join(hist_dir, "stock_selector_*.pkl")))
+            for old in archives[:max(0, len(archives) - self.MODEL_HISTORY_KEEP)]:
+                try:
+                    os.remove(old)
+                    m = old.replace(".pkl", ".meta.json")
+                    if os.path.exists(m):
+                        os.remove(m)
+                except OSError:
+                    pass
+
+        joblib.dump(self.model, self.model_path)
+        if self.model_aux:
+            joblib.dump(self.model_aux, self.model_aux_path)
+        with open(self.model_meta_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "feature_names": self.feature_names,
+                "model_type": self.model_type,
+                "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "keep_index": self._keep_index,
+                "metrics": metrics,
+            }, f, ensure_ascii=False, indent=2)
 
 
 class FactorOptimizer:
@@ -463,18 +510,23 @@ class FactorOptimizer:
         if not ic:
             return {}
 
-        # 只保留正向IC因子
-        positive_ic = {k: v for k, v in ic.items() if v > 0.02}
-        if not positive_ic:
-            positive_ic = ic
+        # 负IC因子取绝对值参与权重分配(其预测力同样有效，方向相反)；
+        # 原fallback把负IC因子与正IC同池softmax，负向因子获得正向权重
+        # 却不做方向翻转 → 系统性反向加权
+        abs_ic = {k: abs(v) for k, v in ic.items() if abs(v) > 0.02}
+        if not abs_ic:
+            abs_ic = {k: abs(v) for k, v in ic.items()}
+            self._neg_ic_factors = {k for k, v in ic.items() if v < 0}
 
-        # 对IC值做softmax归一化
-        ic_values = np.array(list(positive_ic.values()))
+        # 对|IC|做softmax归一化
+        ic_values = np.array(list(abs_ic.values()))
         ic_weights = np.exp(ic_values * 5) / np.sum(np.exp(ic_values * 5))
 
         self.optimal_weights = dict(
-            zip(positive_ic.keys(), [round(w, 4) for w in ic_weights])
+            zip(abs_ic.keys(), [round(w, 4) for w in ic_weights])
         )
+        # 记录负IC因子清单供调用方决定是否取反该因子评分
+        self.negative_ic_factors = sorted(k for k, v in ic.items() if v < 0)
 
         return self.optimal_weights
 

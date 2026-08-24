@@ -445,7 +445,7 @@ class DragonTigerBoard:
                     if not match.empty:
                         row = match.iloc[0]
                         change_pct = float(row.get("对应值", 0) or 0)
-                        volume = float(row.get("成交量", 0) or 0)
+                        float(row.get("成交量", 0) or 0)
                         amount = float(row.get("成交额", 0) or 0) * 1e4
                         indicator = str(row.get("指标", ""))
                         _score_from_row(

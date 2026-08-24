@@ -79,10 +79,15 @@ class ChipDistribution:
                 for j in range(avg_idx, high_idx + 1):
                     chips[j] += vol * (high_idx - j) / (high_idx - avg_idx + 1)
 
-            # 换手率衰减（旧筹码按换手率衰减）
+            # 换手率衰减（旧筹码按换手率衰减）。
+            # 标准算法应衰减全部旧筹码再叠加当日新筹码；原实现只衰减
+            # chips[:low_idx](当日最低价以下档位)，高价区旧筹码永不衰减。
+            # 换手率缺失(NaN，备源无此字段)按无衰减(1.0)处理，防止NaN污染整个分布
             if turnover is not None and i > 0:
-                decay = 1 - turnover.iloc[i] / 100
-                chips[:low_idx] *= decay
+                t = turnover.iloc[i]
+                if pd.notna(t) and t > 0:
+                    decay = max(0.0, min(1.0, 1 - t / 100))
+                    chips *= decay
 
         # 归一化
         total_chips = chips.sum()

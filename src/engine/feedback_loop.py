@@ -163,10 +163,13 @@ class FeedbackLoop:
         }
 
         # 收益窗口字段与 horizon 对应；显式 is not None 判断——
-        # 此前用 or 链，d14_return=0(有效值)会被误跳到下一窗口
+        # 此前用 or 链，d14_return=0(有效值)会被误跳到下一窗口。
+        # 窗口优先级 d3 最先：实盘持仓 hold_days=3，短窗口归因与调权目标一致；
+        # 原顺序 d14 优先导致同一批归因记录持有窗口横跨 1~14 天且取决于
+        # 回填任务的执行顺序而非业务规则
         horizon_fields = [
-            ("d14_return", 14), ("d10_return", 10), ("d5_return", 5),
-            ("d3_return", 3), ("d1_return", 1),
+            ("d3_return", 3), ("d1_return", 1), ("d5_return", 5),
+            ("d10_return", 10), ("d14_return", 14),
         ]
 
         for rec in recs:
@@ -230,6 +233,20 @@ class FeedbackLoop:
                 pass
         return {}
 
+    @staticmethod
+    def _load_dynamic_ortho_pairs() -> list:
+        """读取持久化的动态正交化对(config/dynamic_ortho_pairs.json)"""
+        import os
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "config", "dynamic_ortho_pairs.json",
+        )
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return [tuple(p) for p in json.load(f).get("pairs", [])]
+        except Exception:
+            return []
+
     def _run_ic_analysis(self, today: str = None) -> Dict:
         """计算最近14天因子IC，与30天IC对比检测衰减。
         注意：IC 基于 factor_snapshots（当日候选池，已过初筛），属于"候选池内 IC"，
@@ -239,7 +256,7 @@ class FeedbackLoop:
         if today is None:
             today = datetime.now().strftime("%Y-%m-%d")
         from src.data.market_data import MarketDataFetcher
-        mf = MarketDataFetcher()
+        MarketDataFetcher()
 
         factor_data = self._build_ic_dataset(days=30, today=today)
         if factor_data.empty:
@@ -269,14 +286,17 @@ class FeedbackLoop:
 
         # === 动态扩展正交化因子对 ===
         # 静态 ORTHOGONALIZE_PAIRS 来自代码级共线分析(硬编码4对)，此处基于
-        # 近30天24维子评分截面补充检测：相关性>0.85 的新高相关对追加进
-        # StockScorer.ORTHOGONALIZE_PAIRS，次日 batch_normalize 生效。
+        # 近30天24维子评分截面补充检测：相关性>0.85 的新高相关对持久化到
+        # config/dynamic_ortho_pairs.json，次日由调用方读入 batch_normalize。
+        # 不再直接修改 StockScorer.ORTHOGONALIZE_PAIRS 类属性——那是进程级
+        # 全局副作用，重启即丢、回测与生产行为漂移、且影响所有并发使用者。
         # 阈值比 analyze_factor_correlation 默认0.7 更保守，避免误杀独立信息；
         # 方向约定按因子名排序(target<-regressor)，保证可复现。
         try:
             corr_df = optimizer.analyze_factor_correlation(factor_data)
             if corr_df is not None and not corr_df.empty:
-                existing_pairs = {frozenset(p) for p in StockScorer.ORTHOGONALIZE_PAIRS}
+                existing_pairs = {frozenset(p) for p in self._load_dynamic_ortho_pairs()}
+                existing_pairs.update(frozenset(p) for p in StockScorer.ORTHOGONALIZE_PAIRS)
                 added = []
                 for _, row in corr_df.iterrows():
                     if row["correlation"] < 0.85:
@@ -285,11 +305,17 @@ class FeedbackLoop:
                     if len(pair) < 2 or pair in existing_pairs:
                         continue
                     a, b = sorted(pair)
-                    StockScorer.ORTHOGONALIZE_PAIRS.append((a, b))
                     existing_pairs.add(pair)
-                    added.append(f"{a}<-{b}({row['correlation']:.2f})")
+                    added.append((a, b, row["correlation"]))
                 if added:
-                    logger.info("动态正交化新增 %d 对: %s", len(added), ", ".join(added))
+                    current = [list(p) for p in sorted({frozenset(p) for p in self._load_dynamic_ortho_pairs()} | {frozenset((a, b)) for a, b, _ in added}, key=lambda s: sorted(s))]
+                    import os as _os
+                    cfg_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "config")
+                    _os.makedirs(cfg_dir, exist_ok=True)
+                    with open(_os.path.join(cfg_dir, "dynamic_ortho_pairs.json"), "w", encoding="utf-8") as f:
+                        json.dump({"pairs": current, "updated_at": today}, f, ensure_ascii=False, indent=2)
+                    logger.info("动态正交化新增 %d 对: %s", len(added),
+                                ", ".join(f"{a}<-{b}({c:.2f})" for a, b, c in added))
         except Exception as e:
             logger.warning("动态正交化检测失败(不影响IC分析): %s", e)
 
@@ -353,7 +379,7 @@ class FeedbackLoop:
 
         from collections import defaultdict
         today_dt = datetime.strptime(today, "%Y-%m-%d")
-        latest_ic = self.db.get_latest_ic(days=14)
+        self.db.get_latest_ic(days=14)
         changes = []
 
         # 调权基准与生产 scorer 完全一致：config.yaml 静态先验 + DB 最新调权结果。

@@ -288,7 +288,7 @@ class ReboundSustainability:
         if len(close) < 30:
             return result
 
-        today_change = change_pct.iloc[-1] if not change_pct.empty else 0
+        change_pct.iloc[-1] if not change_pct.empty else 0
 
         # 查找历史相似模式
         # 条件：前10日跌>8%，今日涨>2%
@@ -343,7 +343,7 @@ class NextDayPredictor:
         change_pct = df["涨跌幅"] if "涨跌幅" in df.columns else df.get("pct_chg", pd.Series())
 
         sustainability_score = sustainability.get("sustainability_score", 50)
-        rebound_type = sustainability.get("rebound_type", "unknown")
+        sustainability.get("rebound_type", "unknown")
 
         # ============================================================
         # 1. 次日偏向

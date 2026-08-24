@@ -3,20 +3,12 @@
 
 增强功能：
   - 时间衰减权重（exp(-Δt/6h) 半衰期6小时，6小时内权重1.0，24小时衰减到0.4）
-  - jieba 分词匹配（可选，未安装则降级到字符串 in 匹配）
   - 否定前缀过滤（"未利好"/"不涨停" 不应被 "利好"/"涨停" 命中）
 """
 import math
 import re
 from datetime import datetime
 from typing import List, Dict
-
-# 可选依赖：jieba 分词
-try:
-    import jieba
-    _HAS_JIEBA = True
-except ImportError:
-    _HAS_JIEBA = False
 
 
 # 否定前缀词：如果关键词前出现这些词，则视为否定（不命中）
@@ -26,7 +18,7 @@ _NEGATION_PREFIXES = ("未", "不", "非", "没", "无", "难")
 class NewsFactor:
     """消息面因子计算器"""
 
-    def __init__(self, keywords_config: dict = None):
+    def __init__(self, keywords_config: dict = None, asof: datetime = None):
         cfg = keywords_config or {}
         self.policy_kw = cfg.get("policy", ["央行", "国务院", "证监会", "降准", "降息", "LPR"])
         self.industry_kw = cfg.get("industry", ["芯片", "AI", "人工智能", "新能源", "光伏", "半导体"])
@@ -34,16 +26,8 @@ class NewsFactor:
         self.rumor_kw = cfg.get("rumor", ["传", "据称", "消息称", "市场传闻", "小作文"])
         self.positive_kw = cfg.get("positive", ["利好", "突破", "增长", "超预期", "涨停", "大涨"])
         self.negative_kw = cfg.get("negative", ["利空", "下跌", "暴雷", "处罚", "减持", "跌停"])
-
-        # jieba 初始化（首次分词时 lazy load）
-        if _HAS_JIEBA:
-            try:
-                # 预先加入金融领域关键词，避免被错误切分
-                for kw in (self.policy_kw + self.industry_kw + self.company_kw +
-                           self.rumor_kw + self.positive_kw + self.negative_kw):
-                    jieba.add_word(kw)
-            except Exception:
-                pass
+        # 时间衰减基准：None=真实now(实盘)；回测传入评估日避免软前视
+        self.asof = asof
 
     # ------------------------------------------------------------------
     # 分析新闻列表
@@ -150,7 +134,7 @@ class NewsFactor:
         score += min(mention_weight * 5, 20)
 
         for news in related:
-            w = self._time_weight(news)
+            w = self._time_weight(news, asof=self.asof)
             content = news.get("content", "")
             if self._match_with_negation(content, self.positive_kw):
                 score += 10 * w
@@ -168,10 +152,15 @@ class NewsFactor:
     # 时间衰减权重
     # ------------------------------------------------------------------
     @staticmethod
-    def _time_weight(news: Dict, half_life_hours: float = 6.0) -> float:
+    def _time_weight(news: Dict, half_life_hours: float = 6.0,
+                     asof: datetime = None) -> float:
         """根据新闻发布时间计算权重。
         半衰期 6 小时：发布时权重 1.0，6小时后 0.5，24小时后约 0.0625。
         缺失时间字段时默认权重 0.5（中等时效）。
+
+        asof: 评估基准时间。None 时用真实当前时间(实盘)；回测/复现场景
+        应传入被评估的交易日收盘时间，否则历史新闻权重全部趋近0(软前视，
+        回测与实盘行为不一致)。
         """
         t = news.get("time") or news.get("published_at") or news.get("timestamp")
         if t is None:
@@ -183,7 +172,8 @@ class NewsFactor:
                 return 0.5
         if not isinstance(t, datetime):
             return 0.5
-        delta_hours = (datetime.now() - t).total_seconds() / 3600.0
+        now = asof or datetime.now()
+        delta_hours = (now - t).total_seconds() / 3600.0
         if delta_hours < 0:
             return 1.0  # 时间异常（未来时间），视为最新
         # exp(-Δt / half_life)
@@ -212,16 +202,7 @@ class NewsFactor:
 
     @staticmethod
     def extract_stock_codes(text: str) -> List[str]:
-        """提取文本中的A股代码（6位数字，以 0/3/6 开头）"""
-        codes = re.findall(r"\b[036]\d{5}\b", text)
+        """提取文本中的A股代码（6位数字，以 0/3/6 开头）。
+        用环视替代 \\b：中文语境下中文与数字同属 \\w，\\b 永远不成立。"""
+        codes = re.findall(r"(?<![0-9A-Za-z])([036]\d{5})(?![0-9A-Za-z])", text)
         return list(set(codes))
-
-    def tokenize(self, text: str) -> List[str]:
-        """分词。优先用 jieba，失败则降级到字符串切分。"""
-        if _HAS_JIEBA:
-            try:
-                return list(jieba.cut(text))
-            except Exception:
-                pass
-        # 降级：按空白和标点切分
-        return re.split(r"[\s,，。；;：:!?！？、]+", text)

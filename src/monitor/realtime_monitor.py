@@ -38,8 +38,8 @@ class RealtimeMonitor:
         today = df.iloc[-1]
         change_pct = today.get("涨跌幅", 0) if "涨跌幅" in df.columns else today.get("pct_chg", 0)
         volume = today.get("成交量", 0) if "成交量" in df.columns else today.get("volume", 0)
-        amount = today.get("成交额", 0) if "成交额" in df.columns else today.get("amount", 0)
-        high = today.get("最高", 0) if "最高" in df.columns else today.get("high", 0)
+        today.get("成交额", 0) if "成交额" in df.columns else today.get("amount", 0)
+        today.get("最高", 0) if "最高" in df.columns else today.get("high", 0)
         low = today.get("最低", 0) if "最低" in df.columns else today.get("low", 0)
         close = today.get("收盘", 0) if "收盘" in df.columns else today.get("close", 0)
         open_price = today.get("开盘", 0) if "开盘" in df.columns else today.get("open", 0)
@@ -49,7 +49,6 @@ class RealtimeMonitor:
         if pre_close is None or pre_close <= 0 or close is None or close <= 0:
             return alerts
 
-        severity = "low"
 
         # 1. 闪崩检测（跌幅>7%）
         if change_pct < -7:

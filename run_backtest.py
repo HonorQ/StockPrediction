@@ -13,7 +13,6 @@ import sys; sys.path.insert(0, '.'); sys.path.insert(0, 'src')
 import os, time, pandas as pd, baostock as bs
 import yaml, atexit, pickle, argparse, json
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.data.database import StockDatabase
 from src.engine.factor_attribution import AttributionAggregator
 from src.engine.feedback_loop import FeedbackLoop
@@ -128,16 +127,25 @@ def prefetch_with_cache(stocks, start, end, refresh=False) -> dict:
     return kc
 
 def prefetch(stocks, start, end):
+    """预取K线。必须串行：baostock 的 query/next 共享一个全局 socket，
+    多线程并发读取会产生 utf-8 解码错误与 10054 断连(实测)，且失败重试
+    反而拖慢总耗时。单线程顺序拉取约 0.2s/只，3000 只约 10 分钟。"""
     data = {}
-    logger.info(f'  预取 {len(stocks)} 只K线...')
+    logger.info(f'  预取 {len(stocks)} 只K线(串行)...')
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        fut = {ex.submit(fetch_kline, c, start, end): c for c, _ in stocks}
-        for i, f in enumerate(as_completed(fut), 1):
-            c, r = f.result()
-            if r: data[c] = r
-            if i % 1000 == 0: logger.info(f'    {i}/{len(stocks)} ({time.time() - t0:.0f}s)')
-    logger.info(f'  完成 {len(data)} 只 ({time.time() - t0:.0f}s)')
+    fails = 0
+    for i, (c, _) in enumerate(stocks, 1):
+        try:
+            _, r = fetch_kline(c, start, end)
+            if r:
+                data[c] = r
+        except Exception:
+            fails += 1
+        if i % 500 == 0:
+            rate = i / max(time.time() - t0, 1)
+            eta = (len(stocks) - i) / max(rate, 0.01)
+            logger.info(f'    {i}/{len(stocks)} ({time.time() - t0:.0f}s, {rate:.1f}只/s, ETA {eta:.0f}s, 失败{fails})')
+    logger.info(f'  完成 {len(data)} 只 ({time.time() - t0:.0f}s, 失败 {fails})')
     return data
 
 def get_stocks(date):

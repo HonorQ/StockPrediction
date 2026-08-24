@@ -44,15 +44,16 @@ class RelativeStrength:
         """个股价格强度"""
         factors = {}
 
-        # 多周期动量
-        if len(close) >= 5:
-            factors["momentum_5d"] = round((close.iloc[-1] / close.iloc[-5] - 1) * 100, 2)
-        if len(close) >= 10:
-            factors["momentum_10d"] = round((close.iloc[-1] / close.iloc[-10] - 1) * 100, 2)
-        if len(close) >= 20:
-            factors["momentum_20d"] = round((close.iloc[-1] / close.iloc[-20] - 1) * 100, 2)
-        if len(close) >= 60:
-            factors["momentum_60d"] = round((close.iloc[-1] / close.iloc[-60] - 1) * 100, 2)
+        # 多周期动量（N日动量 = 今收 / N个交易日前收，故取 -(N+1)；
+        # 原实现 [-N] 实际是 N-1 日动量，系统性偏移一天）
+        if len(close) >= 6:
+            factors["momentum_5d"] = round((close.iloc[-1] / close.iloc[-6] - 1) * 100, 2)
+        if len(close) >= 11:
+            factors["momentum_10d"] = round((close.iloc[-1] / close.iloc[-11] - 1) * 100, 2)
+        if len(close) >= 21:
+            factors["momentum_20d"] = round((close.iloc[-1] / close.iloc[-21] - 1) * 100, 2)
+        if len(close) >= 61:
+            factors["momentum_60d"] = round((close.iloc[-1] / close.iloc[-61] - 1) * 100, 2)
 
         # 创新高/新低
         if len(close) >= 20:
@@ -90,11 +91,11 @@ class RelativeStrength:
         if min_len < 20:
             return factors
 
-        stock_ret_5d = stock_close.iloc[-1] / stock_close.iloc[-min(5, min_len)] - 1
-        market_ret_5d = market_close.iloc[-1] / market_close.iloc[-min(5, min_len)] - 1
+        stock_ret_5d = stock_close.iloc[-1] / stock_close.iloc[-min(6, min_len)] - 1
+        market_ret_5d = market_close.iloc[-1] / market_close.iloc[-min(6, min_len)] - 1
 
-        stock_ret_20d = stock_close.iloc[-1] / stock_close.iloc[-min(20, min_len)] - 1
-        market_ret_20d = market_close.iloc[-1] / market_close.iloc[-min(20, min_len)] - 1
+        stock_ret_20d = stock_close.iloc[-1] / stock_close.iloc[-min(21, min_len)] - 1
+        market_ret_20d = market_close.iloc[-1] / market_close.iloc[-min(21, min_len)] - 1
 
         # 相对强度（超额收益）
         factors["relative_strength_5d"] = round((stock_ret_5d - market_ret_5d) * 100, 2)
@@ -108,9 +109,12 @@ class RelativeStrength:
                 correlation = stock_returns.corr(market_returns)
                 stock_vol = stock_returns.std()
                 market_vol = market_returns.std()
-                if market_vol > 0:
+                # corr/std 在方差为0或长度不足时可能为 NaN/inf，直接丢弃而非入库污染下游
+                if (market_vol and market_vol > 0 and stock_vol is not None
+                        and pd.notna(correlation) and pd.notna(stock_vol)):
                     beta = correlation * stock_vol / market_vol
-                    factors["beta"] = round(beta, 4)
+                    if pd.notna(beta):
+                        factors["beta"] = round(float(beta), 4)
 
         return factors
 

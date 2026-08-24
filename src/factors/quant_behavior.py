@@ -163,9 +163,9 @@ class QuantBehaviorDetector:
 
         today = df.iloc[-1]
         open_price = today.get("开盘", 0)
-        close_price = today.get("收盘", 0)
-        high = today.get("最高", 0)
-        low = today.get("最低", 0)
+        today.get("收盘", 0)
+        today.get("最高", 0)
+        today.get("最低", 0)
         pre_close = today.get("昨收", 0)
 
         if pre_close <= 0 or open_price <= 0:
@@ -235,7 +235,7 @@ class QuantBehaviorDetector:
 
         # 从实时数据获取集合竞价信息
         open_price = realtime.get("open", 0)
-        price = realtime.get("price", 0)
+        realtime.get("price", 0)
         pre_close = realtime.get("pre_close", 0)
 
         if pre_close <= 0 or open_price <= 0:
@@ -368,7 +368,7 @@ class QuantBehaviorDetector:
 
         today = df.iloc[-1]
         change_pct = today.get("涨跌幅", 0)
-        high = today.get("最高", 0)
+        today.get("最高", 0)
         close = today.get("收盘", 0)
         pre_close = today.get("昨收", 0)
 

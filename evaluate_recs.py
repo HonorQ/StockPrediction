@@ -91,7 +91,7 @@ def compute_regime_ts(trade_date: str, market_fetcher) -> str:
         # MA20 趋势
         ma20 = closes.rolling(20).mean().iloc[-1]
         current = closes.iloc[-1]
-        prev = closes.iloc[-2]
+        closes.iloc[-2]
         prev_ma20 = closes.iloc[-2:].rolling(20).mean().iloc[-1] if len(closes) >= 21 else ma20
 
         score = 50.0
@@ -160,7 +160,7 @@ def compute_regime_map(dates: List[str]) -> Dict[str, str]:
             chg_prev = (closes.iloc[-1] / closes.iloc[-2] - 1) * 100
             ma20 = closes.rolling(20).mean().iloc[-1]
             current = closes.iloc[-1]
-            prev = closes.iloc[-2]
+            closes.iloc[-2]
             prev_ma20 = closes.iloc[-2:].rolling(20).mean().iloc[-1] if len(closes) >= 21 else ma20
 
             score = 50.0

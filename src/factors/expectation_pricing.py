@@ -255,7 +255,7 @@ class NewsEventAnalyzer:
             return result
 
         close = df["收盘"] if "收盘" in df.columns else df["close"]
-        change_pct = df["涨跌幅"] if "涨跌幅" in df.columns else df.get("pct_chg", pd.Series())
+        df["涨跌幅"] if "涨跌幅" in df.columns else df.get("pct_chg", pd.Series())
 
         # 查找相关新闻
         relevant_news = self._find_relevant_news(news_list, stock_code)
@@ -350,7 +350,7 @@ class ProfitTakingDetector:
             o = row.get("开盘", 0)
             h = row.get("最高", 0)
             c = row.get("收盘", 0)
-            l = row.get("最低", 0)
+            row.get("最低", 0)
 
             if h > 0 and o > 0:
                 upper_shadow = h - max(o, c)

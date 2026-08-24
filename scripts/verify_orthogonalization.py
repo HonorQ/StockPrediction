@@ -3,7 +3,6 @@
 用法: python scripts/verify_orthogonalization.py [--days 60]
 """
 import os, sys, json, argparse
-import numpy as np
 import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -123,7 +122,7 @@ def main():
     else:
         print("  无")
 
-    print(f"\n=== 完整相关系数矩阵 ===\n")
+    print("\n=== 完整相关系数矩阵 ===\n")
     pd.set_option('display.max_columns', 22)
     pd.set_option('display.width', 200)
     print(corr_matrix.round(3))

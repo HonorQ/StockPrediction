@@ -335,8 +335,8 @@ class StockStrategies:
         o3, h3, l3, c3 = StockStrategies._get_ohlc(df, -1)
         body1 = abs(c1 - o1)
         body2 = abs(c2 - o2)
-        body3 = abs(c3 - o3)
-        avg_price = (o1 + h1 + l1 + c1) / 4
+        abs(c3 - o3)
+        (o1 + h1 + l1 + c1) / 4
         # 阴线+小实体+阳线
         if not (c1 < o1 and body2 < body1 * 0.3 and c3 > o3):
             return False

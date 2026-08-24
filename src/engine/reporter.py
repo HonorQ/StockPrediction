@@ -376,7 +376,8 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
     # ------------------------------------------------------------------
     # 推荐段落
     # ------------------------------------------------------------------
-    def _build_recommendations(self, recommendations: List[Dict], stop_loss_pct: float, take_profit_pct: float) -> str:
+    def _build_recommendations(self, recommendations: List[Dict], stop_loss_pct: float, take_profit_pct: float,
+                               max_display: int = None) -> str:
         if not recommendations:
             return """
 <section class="sec">今日精选</section>
@@ -384,8 +385,11 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
   <p style="color:#8a8578;text-align:center;padding:20px;">今日无达标股票，建议观望</p>
 </div>"""
 
+        # 展示数量与上游推荐数解耦：原硬编码 [:2] 使 regime bull 放宽到
+        # 5 只的推荐永远只展示 2 只，展示层与推荐控制脱节且不可配置
+        limit = max_display or len(recommendations)
         cards = []
-        for i, rec in enumerate(recommendations[:2], 1):
+        for i, rec in enumerate(recommendations[:limit], 1):
             cards.append(self._format_one_stock_html(rec, i, stop_loss_pct, take_profit_pct))
         return f"""
 <section class="sec">今日精选</section>
@@ -405,7 +409,6 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
         star_count = min(int(score / 20) + 1, 5)
         stars_html = "★" * star_count + "☆" * (5 - star_count)
 
-        score_cls = "score-high" if score >= 70 else ("score-mid" if score >= 50 else "score-low")
 
         # 因子表格行
         factor_rows = self._build_factor_rows(factors)
@@ -425,6 +428,11 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
         if dynamic_stop > 0 and dynamic_take > 0:
             target = dynamic_take
             stop = dynamic_stop
+            # pct 字段上游可能只写了价格没写百分比，缺失时按价格反推而非 TypeError 崩溃
+            if dynamic_take_pct is None:
+                dynamic_take_pct = (dynamic_take / price - 1) * 100 if price else 0
+            if dynamic_stop_pct is None:
+                dynamic_stop_pct = (dynamic_stop / price - 1) * 100 if price else 0
             profit_pct_str = f"+{dynamic_take_pct:.1f}%"
             loss_pct_str = f"{dynamic_stop_pct:.1f}%"
         else:
@@ -743,9 +751,9 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
         deep_score = factors.get("deep_research_score", 0)
         if deep_score > 0:
             ref = factors.get("historical_reference", "")
-            conf = factors.get("prediction_confidence", 0)
-            vol_regime = factors.get("volatility_regime", "")
-            pos_at = factors.get("position_at", "")
+            factors.get("prediction_confidence", 0)
+            factors.get("volatility_regime", "")
+            factors.get("position_at", "")
             if deep_score > 65:
                 add("深度研究", f"历史匹配({deep_score}分)", ref, star(4))
             elif deep_score > 50:
@@ -918,7 +926,9 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
         from collections import defaultdict
         by_date = defaultdict(list)
         for h in history_records:
-            by_date[h["trade_date"]].append(h)
+            # .get 防御缺列(如旧库行无 score)；展示字段统一 HTML 转义，
+            # 名称来自行情源，含特殊字符会破坏表格结构
+            by_date[str(h.get("trade_date", ""))].append(h)
         days = sorted(by_date.keys(), reverse=True)[:7]
         rows = []
         for d in days:
@@ -930,7 +940,15 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
                 d10 = f'{h.get("d10_return", 0):+.1f}%' if h.get("d10_return") is not None else "-"
                 d1_cls = "up" if h.get("d1_return", 0) and h["d1_return"] > 0 else ("down" if h.get("d1_return", 0) and h["d1_return"] < 0 else "flat")
                 d3_cls = "up" if h.get("d3_return", 0) and h["d3_return"] > 0 else ("down" if h.get("d3_return", 0) and h["d3_return"] < 0 else "flat")
-                rows.append(f'<tr><td>{h["trade_date"]}</td><td>{h["code"]}</td><td>{h["name"]}</td><td>{h["score"]}</td><td class="{d1_cls}">{d1}</td><td class="{d3_cls}">{d3}</td><td>{d5}</td><td>{d10}</td></tr>')
+                rows.append(
+                    f'<tr><td>{_html.escape(str(h.get("trade_date", "")))}</td>'
+                    f'<td>{_html.escape(str(h.get("code", "")))}</td>'
+                    f'<td>{_html.escape(str(h.get("name", "")))}</td>'
+                    f'<td>{_html.escape(str(h.get("score", "")))}</td>'
+                    f'<td class="{d1_cls}">{d1}</td>'
+                    f'<td class="{d3_cls}">{d3}</td>'
+                    f'<td>{d5}</td><td>{d10}</td></tr>'
+                )
         return f"""
 <section class="sec">历史推荐回顾</section>
 <div class="card">
@@ -950,10 +968,15 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
 
     # ------------------------------------------------------------------
     def save_report(self, content: str, filename: str = None) -> str:
-        """保存报告到HTML文件"""
+        """保存报告到HTML文件。
+        相对路径基于项目根目录解析，不再依赖进程 CWD
+        （计划任务/CWD 不同的场景会把报告写到别处）。"""
         if filename is None:
             date_str = datetime.now().strftime("%Y-%m-%d")
             filename = os.path.join("reports", "daily", f"{date_str}.html")
+        if not os.path.isabs(filename):
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            filename = os.path.join(project_root, filename)
 
         os.makedirs(os.path.dirname(filename), exist_ok=True)
         with open(filename, "w", encoding="utf-8") as f:

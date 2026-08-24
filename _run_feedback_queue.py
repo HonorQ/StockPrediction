@@ -114,7 +114,6 @@ def main():
 
     # ---- 阶段1：已在外部独立运行，仅等待其完成 ----
     log("等待阶段1 完成（logs/phase1.out.log 出现 ✅ 完成）...")
-    p1 = None  # 阶段1 非本脚本启动，仅通过日志判断
     t0 = time.time()
     while not phase_done(os.path.join(ROOT, "logs", "phase1.out.log"), min_age=30):
         if time.time() - t0 > 180 * 60:

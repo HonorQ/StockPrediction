@@ -215,9 +215,11 @@ def _update_open_paper_trades(db, market_fetcher, trade_cfg: dict, today: str):
                     close_price = _fetch_close_price_on_date(market_fetcher, code, today_str, 0)
                 except Exception:
                     close_price = None
-                # fallback：如果取不到价格，用入场价平仓（到期不赚钱不亏钱）
+                # 取不到价格时跳过(下日再试)，不用入场价强行平仓——
+                # 那会把"未知收益"记成 0.0，污染纸面交易统计
                 if not close_price or close_price <= 0:
-                    close_price = entry_price
+                    print(f"    ⏳ {name}: 到期但取不到当日价格，顺延平仓")
+                    continue
                 ret_pct = (close_price / entry_price - 1) * 100
                 db.close_paper_trade(
                     trade_id=trade_id,
@@ -675,7 +677,7 @@ def run_premarket(config):
     margin_factor = MarginTradingFactor()
     shareholder_factor = ShareholderChangeFactor()
     lockup_factor = LockUpExpiryFactor()
-    season_factor = SeasonalityFactor()
+    SeasonalityFactor()
     limit_quality_factor = LimitUpQualityFactor()
     sector_linkage = SectorLinkage()
     money_flow_continuity = MoneyFlowContinuity(money_fetcher=money_fetcher)
@@ -1224,7 +1226,12 @@ def run_premarket(config):
 
     # 截面Z-Score归一化
     print("  --- 截面Z-Score归一化(替代固定50分基线) ---")
-    StockScorer.batch_normalize(scored_stocks, weights)
+    # 动态正交化对由 feedback_loop IC 分析持久化，跨进程生效
+    from src.engine.feedback_loop import FeedbackLoop
+    dynamic_pairs = FeedbackLoop._load_dynamic_ortho_pairs()
+    if dynamic_pairs:
+        print(f"  (动态正交化 {len(dynamic_pairs)} 对已加载)")
+    StockScorer.batch_normalize(scored_stocks, weights, extra_ortho_pairs=dynamic_pairs)
 
     # 信号筛选
     print("  --- 第二层: 信号强度筛选 ---")

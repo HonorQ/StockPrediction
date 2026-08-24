@@ -2,6 +2,7 @@
 板块轮动 + 超跌反弹因子
 识别板块强弱切换、超跌修复行情
 """
+import numpy as np
 import pandas as pd
 from typing import Dict, List
 
@@ -188,7 +189,7 @@ class OversoldReboundStrategy:
             return result
 
         close = df["收盘"] if "收盘" in df.columns else df["close"]
-        volume = df["成交量"] if "成交量" in df.columns else df["volume"]
+        df["成交量"] if "成交量" in df.columns else df["volume"]
         change_pct = df["涨跌幅"] if "涨跌幅" in df.columns else df.get("pct_chg", pd.Series())
 
         score = 0
@@ -219,7 +220,9 @@ class OversoldReboundStrategy:
             delta = close.diff()
             gain = delta.where(delta > 0, 0).rolling(14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            # 连续14阳时 loss=0 → rs=inf → RSI=100，isna() 查不出 inf，需显式防护
             rs = gain / loss
+            rs = rs.replace([np.inf, -np.inf], np.nan)
             rsi = 100 - (100 / (1 + rs))
             if not rsi.isna().iloc[-1]:
                 rsi_val = rsi.iloc[-1]

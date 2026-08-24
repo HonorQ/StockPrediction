@@ -24,12 +24,21 @@ WRONG_RETURN_MAX = -1.0     # 收益 < -1% 才算错误
 
 def classify_signal(score: float, factor_median: float = 50.0) -> str:
     """判断信号方向。
-    使用相对强度：score 须比该股票所有因子的中位数高出/低出足够多才算明确信号。
+
+    相对强度判定：score 须比该股所有因子的中位数偏离足够多。
+    补充绝对偏离兜底：全因子普遍高分的优质股(如均80, median=80)
+    没有任何因子能满足相对条件 → 原实现下这类股票在归因体系集体沉默，
+    统计样本系统性偏向"因子内部分化"的股票。现允许 |score-50|≥15
+    的强绝对信号绕过相对条件。
     """
     deviation = score - factor_median
-    if score > BULLISH_THRESHOLD and deviation > 5:
+    # 绝对偏离兜底: |score-50|>=25 的强信号即使相对偏离不足也参与归因，
+    # 避免全因子普遍高分的优质股(median 跟着高)集体沉默
+    strong_absolute_bull = (score - 50) >= 25
+    strong_absolute_bear = (50 - score) >= 25
+    if score > BULLISH_THRESHOLD and (deviation > 5 or strong_absolute_bull):
         return "bullish"
-    elif score < BEARISH_THRESHOLD and deviation < -5:
+    elif score < BEARISH_THRESHOLD and (deviation < -5 or strong_absolute_bear):
         return "bearish"
     return "neutral"
 
@@ -194,7 +203,7 @@ class AttributionAggregator:
         lines.append("")
         lines.append("因子准确率排名 (最差->最好):")
         for _, row in df.iterrows():
-            bar = "█" * int(abs(row["accuracy"]) * 10)
+            "█" * int(abs(row["accuracy"]) * 10)
             if row["total_cases"] >= 3:
                 flag = " ⚠️" if row["accuracy"] < 0.4 else " ✅" if row["accuracy"] > 0.7 else ""
                 lines.append(

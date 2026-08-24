@@ -24,10 +24,24 @@ class BacktestEngine:
     # 截面评分的最小样本数：少于该值时降级为单股票 calculate_score
     MIN_CROSS_SECTIONAL_SAMPLES = 5
 
-    def __init__(self, initial_capital: float = 100000):
+    def __init__(self, initial_capital: float = 100000,
+                 commission_rate: float = 0.0003, stamp_tax: float = 0.0005,
+                 slippage: float = 0.001):
         self.initial_capital = initial_capital
+        # A股交易成本：佣金万2.5(双边,最低5元)、印花税卖出0.05%、滑点单边0.1%。
+        # 零成本假设会把短线策略的收益系统性高估
+        self.commission_rate = commission_rate
+        self.stamp_tax = stamp_tax
+        self.slippage = slippage
         # 回测覆盖的真实交易日数，由 _simulate_holding 统计（年化/Sharpe 用）
         self.trading_day_count = 0
+
+    def _trade_costs(self, buy_amount: float, sell_amount: float) -> float:
+        """一笔完整交易的总摩擦成本（佣金双边+印花税卖出+滑点已计入价格）"""
+        commission = max(buy_amount * self.commission_rate, 5.0) + \
+                     max(sell_amount * self.commission_rate, 5.0)
+        stamp = sell_amount * self.stamp_tax
+        return commission + stamp
 
     # ------------------------------------------------------------------
     # 训练窗口权重拟合（补 ML_TRAINING_PLAN 缺口#6：真 walk-forward）
@@ -286,7 +300,7 @@ class BacktestEngine:
             out: Dict[str, str] = {}
             for i in range(21, len(closes)):
                 chg = (closes.iloc[i] / closes.iloc[i - 1] - 1) * 100
-                cur, prev = closes.iloc[i], closes.iloc[i - 1]
+                cur, _prev = closes.iloc[i], closes.iloc[i - 1]
                 ma_now, ma_prev = ma20.iloc[i], ma20.iloc[i - 1]
                 if cur > ma_now and ma_now >= ma_prev:
                     trend_pts = 5      # above_ma20_rising
@@ -481,11 +495,18 @@ class BacktestEngine:
                 if exit_idx < entry_idx + hold_days and entry_idx + hold_days < len(history):
                     continue
 
-                ret = (exit_price / entry_price - 1) * 100
+                # 滑点：买入按开盘上浮、卖出按下浮
+                buy_price = entry_price * (1 + self.slippage)
+                sell_price = exit_price * (1 - self.slippage)
+                ret = (sell_price / buy_price - 1) * 100
+
                 shares = int(capital_per_stock / entry_price / 100) * 100
                 if shares <= 0:
                     continue
-                pnl = shares * entry_price * ret / 100
+                buy_amount = shares * buy_price
+                sell_amount = shares * sell_price
+                costs = self._trade_costs(buy_amount, sell_amount)
+                pnl = sell_amount - buy_amount - costs
 
                 entry_date_str = self._date_of(history, entry_idx)
                 exit_date_str = self._date_of(history, exit_idx)
@@ -495,6 +516,7 @@ class BacktestEngine:
                     "entry_date": entry_date_str,
                     "exit_date": exit_date_str,
                     "signal_date": date,
+                    # entry/exit 记录未含滑点的成交参考价；return_pct/pnl 已含全部摩擦成本
                     "entry_price": round(entry_price, 2),
                     "exit_price": round(float(exit_price), 2),
                     "return_pct": round(ret, 2),

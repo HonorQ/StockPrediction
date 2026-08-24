@@ -119,7 +119,7 @@ class DeepResearchFactor:
             return result
 
         vol_30 = change_pct.tail(30).std()
-        vol_60 = change_pct.tail(60).std()
+        change_pct.tail(60).std()
 
         # 对比历史分位（用滚动窗口估算）
         all_vol = []

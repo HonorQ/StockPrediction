@@ -36,10 +36,12 @@ class PolicyEventFactor:
         "战争", "冲突", "制裁", "禁运",
     ]
 
-    def __init__(self):
+    def __init__(self, asof: datetime = None):
         self.macro_detector = MacroEventDetector()
         self.policy_chain = self._load_policy_chain()
         self._macro_events_detected = False
+        # 时间衰减基准：None=真实now(实盘)；回测传入评估日避免软前视
+        self.asof = asof
 
     def _load_policy_chain(self) -> dict:
         """加载政策传导链映射"""
@@ -163,7 +165,7 @@ class PolicyEventFactor:
         # 处理重大事件（最高优先级）
         for news in major_news:
             content = news.get("content", "")
-            time_weight = self._time_weight(news, half_life_hours=12)
+            time_weight = self._time_weight(news, half_life_hours=12, asof=self.asof)
 
             # 直接提到该股
             if stock_code in content or (stock_name and stock_name in content):
@@ -187,7 +189,7 @@ class PolicyEventFactor:
         # 处理政策新闻（通过传导链映射）
         for news in policy_news:
             content = news.get("content", "")
-            time_weight = self._time_weight(news, half_life_hours=24)
+            time_weight = self._time_weight(news, half_life_hours=24, asof=self.asof)
 
             # 通过传导链匹配行业
             matched_sectors = self._match_policy_to_sectors(content)
@@ -237,8 +239,10 @@ class PolicyEventFactor:
     # 时间衰减权重
     # ----------------------------------------------------------------
     @staticmethod
-    def _time_weight(news: Dict, half_life_hours: float = 24.0) -> float:
-        """根据新闻发布时间计算权重（政策新闻半衰期更长）"""
+    def _time_weight(news: Dict, half_life_hours: float = 24.0,
+                     asof: datetime = None) -> float:
+        """根据新闻发布时间计算权重（政策新闻半衰期更长）。
+        asof: 评估基准时间，None=真实now；回测传入评估日避免历史新闻权重趋零的软前视。"""
         t = news.get("time") or news.get("published_at") or news.get("timestamp")
         if t is None:
             return 0.5
@@ -249,7 +253,8 @@ class PolicyEventFactor:
                 return 0.5
         if not isinstance(t, datetime):
             return 0.5
-        delta_hours = (datetime.now() - t).total_seconds() / 3600.0
+        now = asof or datetime.now()
+        delta_hours = (now - t).total_seconds() / 3600.0
         if delta_hours < 0:
             return 1.0
         return math.exp(-delta_hours / half_life_hours)

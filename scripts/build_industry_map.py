@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """用新浪板块数据构建行业映射"""
-import json, sys
+import json
 import akshare as ak
-import pandas as pd
 
 sectors = ak.stock_sector_spot()
 labels = sectors['label'].tolist()

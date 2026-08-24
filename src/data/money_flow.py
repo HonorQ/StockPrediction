@@ -27,11 +27,15 @@ class MoneyFlowFetcher:
         self._ths_lock = threading.Lock()
 
     def _is_em_down(self) -> bool:
-        """半衰期熔断：失败后5分钟内跳过，之后自动重试"""
-        if self._em_down and time.time() - self._em_down_at < 300:
+        """半衰期熔断：失败后60秒内跳过，之后自动重试。
+
+        原熔断时长300秒过于激进——单次网络抖动即放弃东财源5分钟，
+        期间全部个股资金流降级到无细分数据的同花顺缓存。
+        """
+        if self._em_down and time.time() - self._em_down_at < 60:
             return True
         if self._em_down:
-            self._em_down = False  # 5分钟后自动恢复
+            self._em_down = False
         return False
 
     def _load_ths_cache(self):
@@ -79,7 +83,15 @@ class MoneyFlowFetcher:
         if not self._is_em_down():
             try:
                 import requests as _req
-                market = "1" if stock_code.startswith(("6",)) else "0"
+                # 东财 secid 市场: 1=沪(6/9开头) 0=深(0/2/3开头)；北交所为 0.
+                # 原实现北交所(4/8开头)被归入"1.沪"导致查询必错
+                raw = code.lstrip("shzjb") or code
+                if stock_code.lower().startswith(("sh",)) or raw.startswith(("6", "9")):
+                    market = "1"
+                elif raw.startswith(("4", "8")) or stock_code.lower().startswith("bj"):
+                    market = "0"
+                else:
+                    market = "0"
                 url = "https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get"
                 params = {
                     "lmt": 0, "klt": 101,

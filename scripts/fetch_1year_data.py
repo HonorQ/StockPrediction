@@ -9,7 +9,6 @@ import time
 import pickle
 import hashlib
 import baostock as bs
-import pandas as pd
 from datetime import datetime, timedelta
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -175,7 +174,7 @@ def main():
                     success_count += 1
                 else:
                     fail_count += 1
-            except Exception as e:
+            except Exception:
                 fail_count += 1
             
             # 进度显示

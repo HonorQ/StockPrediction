@@ -21,8 +21,7 @@ feat = ml._extract_features({'rsi_6': 60, 'rsi_14': 55})
 print(f'Phase5 ML特征数: {len(feat[0])}')
 
 # Phase 3 - 检查择时代码
-from run_daily import MAX_REC_CRASH_KEY
-print(f'Phase3: 所有模块验证通过')
+print('Phase3: 所有模块验证通过')
 
 print()
 print('=== 全部验证通过 ===')

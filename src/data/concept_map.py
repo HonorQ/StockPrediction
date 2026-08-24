@@ -107,6 +107,7 @@ class ConceptMap:
             # 重新加载合并后的数据
             self._data = self._load()
             logger.info(f'  ✅ 概念同步完成: 新增 {synced_count} 个概念板块')
+            return True
         except Exception as e:
             logger.info(f'  ⚠️ 概念同步失败: {e}')
             return False

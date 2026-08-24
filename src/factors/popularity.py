@@ -68,7 +68,7 @@ class PopularityFactors:
 
         limit_up = data.get("limit_up", 0)
         limit_down = data.get("limit_down", 0)
-        broken = data.get("broken", 0)
+        data.get("broken", 0)
         max_board = data.get("max_board", 0)
 
         # 涨停家数评分

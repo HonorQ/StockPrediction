@@ -280,10 +280,10 @@ class LimitUpQualityFactor:
             return result
 
         today = df.iloc[-1]
-        change_pct = today.get("涨跌幅", 0)
+        today.get("涨跌幅", 0)
         close = today.get("收盘", 0)
         pre_close = today.get("昨收", 0)
-        volume = today.get("成交量", 0)
+        today.get("成交量", 0)
 
         if pre_close <= 0:
             return result

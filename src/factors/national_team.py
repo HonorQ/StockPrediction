@@ -108,13 +108,11 @@ class NationalTeamFactor:
                 score += 0.1
 
             # === 6. 行业和市值判断 ===
-            sector_match = False
             if stock_info:
                 sector = stock_info.get("行业", "")
                 total_mv = stock_info.get("总市值", 0)
 
                 if sector in self.PREFERRED_SECTORS:
-                    sector_match = True
                     score += 0.1
                     signals.append(f"行业匹配({sector})")
 
@@ -172,7 +170,7 @@ class NationalTeamFactor:
 
         # 找出近期的关键支撑位（最近60天的低点）
         support_level = np.min(low[-lookback:])
-        current_price = close[-1]
+        close[-1]
         threshold = support_level * 1.02  # 距支撑位2%以内
 
         # 检测触及支撑位后反弹的次数

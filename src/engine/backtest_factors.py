@@ -92,10 +92,12 @@ def baostock_rows_to_dataframe(kline_rows: List[List]) -> pd.DataFrame:
             high_val = float(row[6]) if row[6] else close
             low_val = float(row[7]) if row[7] else close
         else:
-            # 5 字段 fallback：用 close ± pct 反推近似值
+            # 5 字段 fallback：用 close ± pct 反推近似值。
+            # 影线必须置为实体边界(平K线)——原 *1.005/*0.995 纯构造影线，
+            # 会批量制造虚假的锤头线/上影线等 K 线形态信号污染训练集
             open_val = close / (1 + pct / 100) if pct != 0 else close
-            high_val = max(open_val, close) * 1.005
-            low_val = min(open_val, close) * 0.995
+            high_val = max(open_val, close)
+            low_val = min(open_val, close)
 
         # baostock volume 单位为「股」，生产口径(腾讯K线)为「手」→ 除以100对齐；
         # 成交额(元) = 收盘价 × 股数。原 close*vol*100 把成交额放大百倍污染量价因子

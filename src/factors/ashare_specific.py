@@ -324,7 +324,7 @@ class HotMoneyTracker:
         limit_pct = get_limit_pct(code, name)
 
         close = df["收盘"] if "收盘" in df.columns else df["close"]
-        volume = df["成交量"] if "成交量" in df.columns else df["volume"]
+        df["成交量"] if "成交量" in df.columns else df["volume"]
         change_pct = df["涨跌幅"] if "涨跌幅" in df.columns else df.get("pct_chg", pd.Series())
 
         score = 50
@@ -352,7 +352,7 @@ class HotMoneyTracker:
             row = df.iloc[-1]
             high = row.get("最高", 0)
             low = row.get("最低", 0)
-            close_val = row.get("收盘", 0)
+            row.get("收盘", 0)
             if high > 0 and low > 0:
                 amplitude = (high - low) / low * 100
                 if amplitude > 15:

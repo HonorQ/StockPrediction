@@ -117,7 +117,7 @@ def build_ic_weights(icir_info: Dict[str, Dict], prior: Dict[str, float],
 
     # 只对有效因子做 ICIR 调整（先验 × ICIR），其它保持先验
     weights = dict(prior)
-    total_prior = sum(prior.values()) or 1.0
+    sum(prior.values()) or 1.0
     # 计算有效因子调整后总和相对先验总和的缩放
     adjusted = {dim: prior.get(dim, 0.01) * effective[dim] for dim in effective}
     adj_sum = sum(adjusted.values())

@@ -36,9 +36,10 @@ class FundamentalFactors:
 
         pe = data.get("市盈率-动态", data.get("pe", 0)) or 0
         pb = data.get("市净率", data.get("pb", 0)) or 0
-        ps = data.get("市销率", data.get("ps", 0)) or 0
+        data.get("市销率", data.get("ps", 0)) or 0
 
-        # PE评分
+        # PE评分：pe<=0 区分"亏损(pe<0)"与"数据缺失(=0)"，
+        # 缺失走中性50，不再与真实亏损一起压到20分
         if pe > 0:
             if pe < 15:
                 factors["pe_score"] = 90  # 低估
@@ -50,10 +51,12 @@ class FundamentalFactors:
                 factors["pe_score"] = 30  # 高估
             else:
                 factors["pe_score"] = 10  # 极度高估
+        elif pe < 0:
+            factors["pe_score"] = 20      # 真实亏损
         else:
-            factors["pe_score"] = 20  # 亏损
+            factors["pe_score"] = 50      # 数据缺失 → 中性
 
-        # PB评分
+        # PB评分（同上区分缺失与真实低值）
         if pb > 0:
             if pb < 1:
                 factors["pb_score"] = 90  # 破净
@@ -64,7 +67,7 @@ class FundamentalFactors:
             else:
                 factors["pb_score"] = 30
         else:
-            factors["pb_score"] = 20
+            factors["pb_score"] = 50      # 缺失/非正值 → 中性
 
         factors["pe"] = pe
         factors["pb"] = pb
@@ -82,7 +85,10 @@ class FundamentalFactors:
         circ_yi = circ_mv / 1e8
 
         # 市值评分（中盘股最佳）
-        if 50 <= mv_yi <= 200:
+        # 总市值为0 = 数据源缺失(如新浪备源补充失败)，走中性而非"小盘惩罚"
+        if mv_yi <= 0:
+            factors["market_cap_score"] = 50
+        elif 50 <= mv_yi <= 200:
             factors["market_cap_score"] = 80
         elif 200 < mv_yi <= 500:
             factors["market_cap_score"] = 70
@@ -93,11 +99,8 @@ class FundamentalFactors:
         else:
             factors["market_cap_score"] = 40  # 小盘股风险高
 
-        # 流通比例
-        if total_mv > 0:
-            factors["float_ratio"] = round(circ_mv / total_mv, 2)
-        else:
-            factors["float_ratio"] = 0
+        # 流通比例（缺失时 None 而非 0，避免下游把缺失当零流通盘）
+        factors["float_ratio"] = round(circ_mv / total_mv, 2) if total_mv > 0 else None
 
         factors["total_mv_yi"] = round(mv_yi, 1)
         factors["circ_mv_yi"] = round(circ_yi, 1)

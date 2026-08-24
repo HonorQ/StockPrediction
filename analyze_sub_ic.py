@@ -153,7 +153,7 @@ def classify_factor(stats: Dict[str, float],
       强度 ∈ {强, 中, 弱, 极弱, —}
     """
     ic = stats["ic_mean"]
-    icir = stats["icir"]
+    stats["icir"]
     n = stats["n_days"]
 
     # 优先识别"数据缺失"——独立列取值全相同（nunique<=1）说明历史 premarket

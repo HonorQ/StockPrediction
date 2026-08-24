@@ -35,8 +35,8 @@ class SellSignalDetector:
         signals = []
 
         close = df["收盘"] if "收盘" in df.columns else df["close"]
-        high = df["最高"] if "最高" in df.columns else df["high"]
-        low = df["最低"] if "最低" in df.columns else df["low"]
+        df["最高"] if "最高" in df.columns else df["high"]
+        df["最低"] if "最低" in df.columns else df["low"]
 
         if len(close) < 20:
             return signals
@@ -55,8 +55,10 @@ class SellSignalDetector:
             })
 
         # === MACD死叉：DIF跌破DEA ===
-        ema12 = close.ewm(span=12).mean()
-        ema26 = close.ewm(span=26).mean()
+        # adjust=False 与 technical.py 的 MACD 口径对齐（默认 adjust=True
+        # 会用全样本权重重算历史，两处信号可能不同步）
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
         dif = ema12 - ema26
         dea = dif.ewm(span=9).mean()
         if len(dif) > 1 and len(dea) > 1:

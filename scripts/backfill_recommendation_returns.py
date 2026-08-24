@@ -11,7 +11,6 @@ run_daily 内置的自动回填受"自然日 check_date 窗口"限制，对实�
 幂等：只更新当前为 NULL 的字段；已回填的保持原值（不覆盖，除非 --overwrite）。
 """
 import os
-import sys
 import sqlite3
 import argparse
 

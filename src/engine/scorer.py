@@ -115,10 +115,15 @@ class StockScorer:
         return round(max(0, min(100, total)), 1)
 
     @staticmethod
-    def batch_normalize(candidates: List[Dict], weights: Dict[str, float]):
+    def batch_normalize(candidates: List[Dict], weights: Dict[str, float],
+                        extra_ortho_pairs=None):
         """截面Z-Score归一化：对一批候选的24维子评分做标准化，计算最终得分
         candidates: list of dicts, 每项需包含 'sub_scores' 和 'expectation_penalty'
         修改每个candidate，添加 'score' 和 'z_scores'
+        extra_ortho_pairs: 动态正交化对 [(target, regressor)]，
+            来自 config/dynamic_ortho_pairs.json(feedback_loop IC 分析产出)。
+            不再允许运行时修改类属性——那是进程级全局副作用，重启即丢、
+            回测与生产行为漂移。
 
         评分口径说明: score = 50 + z_total*(50/3)，z 截断 ±3。
         min_score 门槛在此口径下含义是"z_total ≥ (min_score-50)*3/50"，
@@ -127,12 +132,12 @@ class StockScorer:
 
         新增：在 Z-Score 之前对预定义的高相关因子对做残差化正交处理，
         防止共线因子在加权时被重复计算（双重 beta 暴露）。
-        正交化对支持动态扩展：feedback_loop 的 IC 分析会基于截面相关性
-        追加新对到 ORTHOGONALIZE_PAIRS。
         """
         dims = [k for k in weights.keys() if weights.get(k, 0) > 0]
         if not dims or not candidates:
             return
+
+        ortho_pairs = list(StockScorer.ORTHOGONALIZE_PAIRS) + list(extra_ortho_pairs or [])
 
         raw = {dim: [] for dim in dims}
         for c in candidates:
@@ -150,7 +155,7 @@ class StockScorer:
         # === 因子正交化：对高相关因子对做残差化 ===
         # 仅在样本数 >= 10 时执行，避免小样本下回归不稳定
         if len(candidates) >= 10:
-            for target, regressor in StockScorer.ORTHOGONALIZE_PAIRS:
+            for target, regressor in ortho_pairs:
                 if target not in raw or regressor not in raw:
                     continue
                 t_vals = raw[target]
@@ -188,7 +193,11 @@ class StockScorer:
             c["z_scores"] = z_scores
 
     def penalty_expectation(self, f: Dict) -> float:
-        """预期透支惩罚（重大风险一票否决）"""
+        """预期透支/风险信号深度惩罚。
+
+        各分项自带封顶(单项最多-20)，叠加最坏约-75，构成实质性一票否决；
+        旧实现人为截断到-15使 docstring 与行为不符。
+        """
         penalty = 0
 
         # 预期透支
@@ -208,7 +217,7 @@ class StockScorer:
             intensity = f.get("profit_taking_intensity", 0)
             penalty -= min(intensity / 5, 20)
 
-        return max(penalty, -15)  # 最多扣15分
+        return max(penalty, -75)
 
     def _score_trend(self, f: Dict) -> float:
         score = 50
@@ -408,40 +417,34 @@ class StockScorer:
         return max(0, min(100, score))
 
     def _score_quant_behavior(self, f: Dict) -> float:
-        """量化行为评分（取反：低分实际预测正确率70.4%）"""
+        """量化行为评分。
+
+        旧实现把检测到量化风险(high/闪崩/对倒)反向加分(+30/+20)，依据是样本内
+        "低分预测正确率70.4%"——典型 data snooping，且与报告层将 quant_risk=high
+        标 🚫 风险警示直接矛盾。现改为常识性防御方向：操纵类信号扣分、
+        其余中性；待积累足够 IC 数据后再校准方向。
+        """
         score = 50
 
         quant_risk = f.get("quant_risk", "low")
         quant_signals = f.get("quant_signals", [])
 
-        # 风险等级取反：检测到量化风险→加分（实际70.4%正向收益）
         if quant_risk == "high":
-            score += 30
+            score -= 25
         elif quant_risk == "medium":
-            score += 15
-        elif quant_risk == "low":
             score -= 10
 
-        # 信号数量取反
-        signal_count = len(quant_signals)
-        if signal_count >= 3:
-            score += 25
-        elif signal_count >= 2:
-            score += 15
-        elif signal_count == 1:
-            score += 5
-
         for signal in quant_signals:
-            if "闪崩" in signal:
-                score += 20
-            elif "秒板" in signal:
-                score += 15
+            if "闪崩" in signal or "天地板" in signal:
+                score -= 15          # 巨量下跌/极端振幅：明确风险
+            elif "对倒" in signal or "诱多" in signal or "诱空" in signal:
+                score -= 12          # 操纵痕迹
             elif "尾盘" in signal:
-                score += 10
-            elif "对倒" in signal:
-                score += 15
-            elif "动量追逐" in signal:
-                score += 10
+                score -= 8           # 尾盘操控
+            elif "秒板" in signal:
+                score -= 5           # 抢筹/出货皆可能，轻度减分
+            elif "涨停未封住" in signal:
+                score -= 8           # 封板失败抛压
 
         return max(0, min(100, score))
 
@@ -514,9 +517,14 @@ class StockScorer:
         return max(0, min(100, score))
 
     def _score_deep_research(self, f: Dict) -> float:
-        """深度研究因子评分（取反：低分实际预测正确率89%）"""
+        """深度研究因子评分：直接透传。
+
+        deep_research_score 内部以 50 为中性、催化/信心加分为正向构造，
+        分越高越好。旧实现 100-raw 整体取反基于样本内"低分正确率89%"，
+        与因子自身语义相反（data snooping），已移除。
+        """
         raw = f.get("deep_research_score", 50)
-        return max(0, min(100, 100 - raw))
+        return max(0, min(100, float(raw)))
 
     def _score_policy_event(self, f: Dict) -> float:
         """政策事件因子评分"""

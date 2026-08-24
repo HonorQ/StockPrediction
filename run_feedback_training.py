@@ -432,14 +432,12 @@ def run_phase(dates, phase_name, db, stock_mgr, global_weights, all_weight_chang
     #    否则 all_stocks 为空导致全程无数据。
     today_str = datetime.now().strftime("%Y-%m-%d")
     all_stocks = []
-    stock_ref_date = None
     for d in sorted(dates, reverse=True):
         if d > today_str:
             continue
         s = get_stocks(d)
         if s:
             all_stocks = s
-            stock_ref_date = d
             break
     if not all_stocks:
         logger.info('  [警告] 未能取到任何股票名单（可能所选日期均无行情），阶段跳过')

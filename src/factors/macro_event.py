@@ -115,7 +115,7 @@ class MacroEventDetector:
                 return events
 
             latest = float(recent[-1]) if pd.notna(recent[-1]) else 0
-            avg_3m = sum(float(x) for x in recent if pd.notna(x)) / len(recent)
+            sum(float(x) for x in recent if pd.notna(x)) / len(recent)
 
             # M2同比>12%（流动性过剩）
             if latest > 12:
@@ -250,7 +250,7 @@ class MacroEventDetector:
 
             cpi_df = df.sort_values("日期").reset_index(drop=True)
             latest_val = float(cpi_df.iloc[-1].get("今值", 0) or 0)
-            forecast_val = float(cpi_df.iloc[-1].get("预测值", 0) or 0)
+            float(cpi_df.iloc[-1].get("预测值", 0) or 0)
 
             # 通缩信号（CPI同比<0）
             if latest_val < 0:
