@@ -182,3 +182,10 @@ weights:
   shareholder: 0.0394
   strategy: 0.02
   trend: 0.0012
+signal_invert:
+  enabled: true
+  regimes:
+  - neutral
+  - bull
+  note: 'A/B实验结论(2026-08): neutral窗口反转d10超额+1.87 vs 基线-4.12; bull窗口+2.21 vs +1.72;
+    bear窗口反转更差(-3.21)故不启用。样本仅3窗口,建议影子模式运行1个月复核后转正'

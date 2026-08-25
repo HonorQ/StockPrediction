@@ -850,6 +850,20 @@ def run_premarket(config):
     except Exception as e:
         logger.warning("大盘择时预评估失败，沿用默认权重: %s", e)
 
+    # === regime 条件化信号反转（A/B 实验落地）===
+    # IC校准发现 trend/strategy/quant_behavior 负贡献；跨窗口回测证实：
+    # neutral/bull 启用反转超额显著改善(neutral d10 +1.87 vs -4.12)，
+    # bear 反转更差(-3.21)故不启用——bear 靠 empty_on_bear 清仓防守。
+    # 三窗口样本有限，先按 config.signal_invert 配置运行并持续复核。
+    try:
+        si_cfg = config.get("signal_invert", {}) or {}
+        if si_cfg.get("enabled") and regime in (si_cfg.get("regimes") or []):
+            scorer.invert_signals = True
+            print(f"  🔁 已启用负IC维度反转打分 (regime={regime}, "
+                  f"维度: {', '.join(scorer.NEGATIVE_IC_DIMS)})")
+    except Exception as e:
+        logger.warning("信号反转配置失败(不影响主流程): %s", e)
+
     # 6. 筛选 + 深度计算
     print("\n[6/6] 筛选股票并计算因子...")
     print("  --- 第一层: 硬性条件筛选 ---")

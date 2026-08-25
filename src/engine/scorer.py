@@ -23,7 +23,15 @@ class StockScorer:
         ("deep_research", "chip"),            # 深度研究与筹码共享60日高低点位置
     ]
 
-    def __init__(self, weights: Dict[str, float] = None):
+    # IC 校准显示负贡献的因子维度(2026-01~08 面板, 5757行):
+    # trend IC=-0.035(t=-2.0) / strategy=-0.022 / quant_behavior=-0.020。
+    # invert_signals=True 时对这些维度取反(100-x)，用于"追涨→低吸"反转假设的
+    # A/B 回测验证；生产是否启用须以跨窗口回测结论为准
+    NEGATIVE_IC_DIMS = ("trend", "strategy", "quant_behavior")
+
+    def __init__(self, weights: Dict[str, float] = None,
+                 invert_signals: bool = False):
+        self.invert_signals = invert_signals
         self.weights = weights or {
             # K线类: 11% (从26%大幅降低，因为K线可被主力操纵)
             "trend": 0.03,
@@ -69,7 +77,7 @@ class StockScorer:
             self.weights = {k: v / _total for k, v in self.weights.items()}
 
     def get_sub_scores(self, factors: Dict) -> Dict[str, float]:
-        return {
+        sub = {
             "trend": self._score_trend(factors),
             "strategy": self._score_strategy(factors),
             "chip": self._score_chip(factors),
@@ -95,6 +103,10 @@ class StockScorer:
             "holder_concentration": self._score_holder_concentration(factors),
             "circulate_holder": self._score_circulate_holder(factors),
         }
+        if self.invert_signals:
+            for dim in self.NEGATIVE_IC_DIMS:
+                sub[dim] = round(100.0 - sub[dim], 2)
+        return sub
 
     def _score_moat(self, factors: Dict) -> float:
         """护城河/不可替代性子评分，直接取 MoatFactors 合成分（已在 0-100）。"""

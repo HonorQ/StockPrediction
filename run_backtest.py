@@ -12,7 +12,12 @@ logger = get_logger()
 import sys; sys.path.insert(0, '.'); sys.path.insert(0, 'src')
 import os, time, pandas as pd, baostock as bs
 import yaml, atexit, pickle, argparse, json
+import socket as _socket
 from datetime import datetime, timedelta
+
+# 全局网络超时：防止数据源半死连接导致整轮回测无限挂起
+# (2026-08-25 案例：baostock login 后 query 无响应，进程 CPU 0 闲置挂起)
+_socket.setdefaulttimeout(20)
 from src.data.database import StockDatabase
 from src.engine.factor_attribution import AttributionAggregator
 from src.engine.feedback_loop import FeedbackLoop
@@ -47,6 +52,17 @@ _CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yam
 with open(_CFG_PATH, "r", encoding="utf-8") as _f:
     WEIGHTS = yaml.safe_load(_f).get("weights", {})
 scorer = StockScorer(WEIGHTS)
+
+# 推荐写入模式：--invert-signals 时用 backtest_invert，
+# 与常规基线(backtest)并存于 recommendations 表便于 A/B 对比
+REC_MODE = "backtest"
+
+
+def enable_invert_signals():
+    """反转假设实验：对负 IC 维度(trend/strategy/quant_behavior)取反打分"""
+    global scorer, REC_MODE
+    scorer = StockScorer(WEIGHTS, invert_signals=True)
+    REC_MODE = "backtest_invert"
 
 def fetch_kline(code, start, end):
     rs = bs.query_history_k_data_plus(code, "date,close,volume,turn,pctChg,open,high,low",
@@ -271,26 +287,70 @@ def main():
     ap.add_argument("--refresh", action="store_true", help="强制重新预取K线(忽略本地缓存)")
     ap.add_argument("--start", default=DEFAULT_START, help="回测窗口起点 YYYY-MM-DD")
     ap.add_argument("--end", default=DEFAULT_END, help="回测窗口终点 YYYY-MM-DD")
+    ap.add_argument("--invert-signals", action="store_true",
+                    help="反转实验: 负IC维度(trend/strategy/quant)取反打分, "
+                         "推荐写入 backtest_invert 模式并跳过反馈循环(不污染调权)")
     args = ap.parse_args()
     _set_window(args.start, args.end)
+    if args.invert_signals:
+        enable_invert_signals()
+        logger.info('  🔁 反转模式已启用: 负IC维度取反打分, mode=backtest_invert')
 
     logger.info('%s', '=' * 60)
     logger.info(f'  Walk-Forward: {WINDOW_START} → {WINDOW_END}')
     logger.info('%s', '=' * 60)
 
-    logger.info('\n[1/4] 获取股票名单')
-    all_stocks = get_stocks(WINDOW_END)
-    if not all_stocks:
-        local = _load_local_stock_list()
-        if local:
-            logger.info(f'  ⚠️ baostock 名单不可用，回退本地K线缓存清单: {len(local)} 只')
-            all_stocks = local
-    if not all_stocks:
-        raise SystemExit('无法获取股票名单(baostock不可用且无本地缓存)，中止')
-    logger.info(f'  候选: {len(all_stocks)} 只')
+    # 缓存优先：窗口K线已全部落盘时，名单直接从缓存推导，完全零网络。
+    # (2026-08-25 案例：query_all_stock 对部分历史日期挂死且 baostock 内部
+    #  吞掉 socket 超时，进程无限等待——绕开是唯一可靠解)
+    # 匹配规则：精确文件名优先；否则扫描全部 bt_kline_*.pkl 解析日期范围，
+    # 取能覆盖 [WINDOW_START, WINDOW_END] 的最大缓存——支持单日分片复用整窗缓存
+    import glob
+    import re as _re
+    cache_path = _kline_cache_path()
+    kc = None
+    if not os.path.exists(cache_path) or args.refresh:
+        best_path, best_n = None, -1
+        for p in glob.glob(os.path.join(os.path.dirname(cache_path), "bt_kline_*.pkl")):
+            m = _re.match(r"bt_kline_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.pkl",
+                          os.path.basename(p))
+            if not m:
+                continue
+            cs, ce = m.group(1), m.group(2)
+            if cs <= WINDOW_START and ce >= WINDOW_END:
+                n = os.path.getsize(p)
+                if n > best_n:
+                    best_path, best_n = p, n
+        if best_path:
+            cache_path = best_path
 
-    logger.info(f'\n[2/4] 预取K线 ({PREFETCH_START}~{WINDOW_END})')
-    kc = prefetch_with_cache(all_stocks, PREFETCH_START, WINDOW_END, refresh=args.refresh)
+    if os.path.exists(cache_path) and not args.refresh:
+        try:
+            with open(cache_path, "rb") as f:
+                kc = pickle.load(f)
+            logger.info(f'\n[1/4] 从K线缓存加载 {len(kc)} 只: {cache_path}')
+        except Exception as e:
+            logger.info(f'  缓存读取失败({e})，转在线模式')
+            kc = None
+
+    if kc:
+        all_stocks = [(c, "") for c in sorted(kc.keys())]
+    else:
+        logger.info('\n[1/4] 获取股票名单(在线)')
+        all_stocks = get_stocks(WINDOW_END)
+        if not all_stocks:
+            local = _load_local_stock_list()
+            if local:
+                logger.info(f'  ⚠️ baostock 名单不可用，回退本地K线缓存清单: {len(local)} 只')
+                all_stocks = local
+        if not all_stocks:
+            raise SystemExit('无法获取股票名单(baostock不可用且无本地缓存)，中止')
+        logger.info(f'  候选: {len(all_stocks)} 只')
+        logger.info(f'\n[2/4] 预取K线 ({PREFETCH_START}~{WINDOW_END})')
+        kc = prefetch_with_cache(all_stocks, PREFETCH_START, WINDOW_END, refresh=args.refresh)
+
+    if not kc:
+        raise SystemExit('未获得任何K线数据，中止')
     if not kc:
         raise SystemExit('未获得任何K线数据，中止')
 
@@ -313,33 +373,37 @@ def main():
         logger.info(f' {len(items)}只→推荐10只')
         for rank, s in enumerate(top10, 1):
             db.save_recommendation(d, s["code"], s["name"], s["score"], s["price"],
-                                   rank=rank, mode="backtest")
+                                   rank=rank, mode=REC_MODE)
 
     logger.info('\n[4/4] 计算收益+反馈循环')
     future_returns(kc)
     # 回测日传入反馈循环，归因/IC/调权仅引用截至当日的记录，杜绝权重前视
     bt_today = DATES[-1]
-    fb = FeedbackLoop({})
-    n_attr = fb._run_attribution(today=bt_today)
-    logger.info(f'  归因: {n_attr} 条')
-    attr = db.get_attribution_history(days=60)
-    if attr:
-        agg = AttributionAggregator(attr)
-        logger.info(f'\n  {agg.summarize()}')
+    if REC_MODE == "backtest_invert":
+        # 反转实验：只产出对比数据，不触发归因/调权(避免污染生产 weight_history)
+        logger.info('  (反转实验模式: 跳过归因/IC/调权)')
+    else:
+        fb = FeedbackLoop({})
+        n_attr = fb._run_attribution(today=bt_today)
+        logger.info(f'  归因: {n_attr} 条')
+        attr = db.get_attribution_history(days=60)
+        if attr:
+            agg = AttributionAggregator(attr)
+            logger.info(f'\n  {agg.summarize()}')
 
-    ic = fb._run_ic_analysis(today=bt_today)
-    if ic.get("status") == "ok":
-        top = sorted(ic.get("factors",{}).items(), key=lambda x: abs(x[1]), reverse=True)[:5]
-        logger.info(f"\n  Top5 IC: {', '.join((f'{k}={v:.3f}' for k, v in top))}")
-        decay = ic.get("decay_factors", {})
-        if decay:
-            for n, d in decay.items():
-                logger.info(f"  IC衰减: {n} {d['ic_all']:.3f}→{d['ic_recent']:.3f}")
+        ic = fb._run_ic_analysis(today=bt_today)
+        if ic.get("status") == "ok":
+            top = sorted(ic.get("factors",{}).items(), key=lambda x: abs(x[1]), reverse=True)[:5]
+            logger.info(f"\n  Top5 IC: {', '.join((f'{k}={v:.3f}' for k, v in top))}")
+            decay = ic.get("decay_factors", {})
+            if decay:
+                for n, d in decay.items():
+                    logger.info(f"  IC衰减: {n} {d['ic_all']:.3f}→{d['ic_recent']:.3f}")
 
-    ch = fb._adjust_weights(today=bt_today)
-    if ch:
-        for c in ch:
-            logger.info(f"  调权: {c['factor']} {c['old_weight']}→{c['new_weight']} ({c['reason']})")
+        ch = fb._adjust_weights(today=bt_today)
+        if ch:
+            for c in ch:
+                logger.info(f"  调权: {c['factor']} {c['old_weight']}→{c['new_weight']} ({c['reason']})")
 
     # 回测跳过 ML 重训练：避免用回测期快照污染生产模型库
     logger.info('  (回测模式跳过 ML 重训练)')
