@@ -676,9 +676,12 @@ class StockDatabase:
             " FROM factor_snapshots fs"
             " INNER JOIN recommendations r"
             "   ON fs.trade_date = r.trade_date AND fs.code = r.code"
-            # 因子快照产自盘前全量计算，只 JOIN 盘前推荐行：
-            # 1) 语义一致；2) 同码同日存在 premarket/afternoon 两行时防止面板样本重复
-            " WHERE fs.trade_date >= ? AND fs.trade_date <= ? AND r.mode='premarket'"
+            # 因子快照产自盘前全量计算，只 JOIN 盘前类推荐行：
+            # 1) 语义一致；2) 同码同日存在 premarket/afternoon 两行时防止面板样本重复。
+            # mode 取值实况：'feedback_training'(历史5980条) / 'premarket'(现行) /
+            # NULL(最早数据) 均属盘前口径；afternoon/backtest 排除
+            " WHERE fs.trade_date >= ? AND fs.trade_date <= ?"
+            " AND (r.mode IN ('premarket', 'feedback_training') OR r.mode IS NULL)"
             f" AND r.{return_col} IS NOT NULL"
             " ORDER BY fs.trade_date"
         )

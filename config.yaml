@@ -139,44 +139,46 @@ regime:
       relative_strength: 0.01
     bear:
       trend: 0.001
-      strategy: 0.03
+      strategy: 0.01
       news: 0.04
       policy_event: 0.05
       leader: 0.03
       relative_strength: 0.005
       volatility: 0.08
       moat: 0.06
+      quant_behavior: 0.001
     crash:
       trend: 0.001
-      strategy: 0.01
+      strategy: 0.003
       news: 0.02
       policy_event: 0.03
       leader: 0.01
       volatility: 0.1
       moat: 0.08
       national_team: 0.06
+      quant_behavior: 0.001
 weights:
-  ashare_specific: 0.0102
-  capital_behavior: 0.0932
-  chip: 0.0279
-  circulate_holder: 0.0279
-  deep_research: 0.0509
-  dragon_tiger: 0.0547
-  fundamental: 0.0576
-  holder_concentration: 0.0464
-  institutional: 0.0576
-  leader: 0.0547
-  lockup_risk: 0.0373
-  margin_trading: 0.0547
-  moat: 0.0373
-  national_team: 0.0373
-  news: 0.0652
-  oversold_rebound: 0.001
-  policy_event: 0.0745
-  quant_behavior: 0.001
-  relative_strength: 0.0092
-  research: 0.0547
-  sector_rotation: 0.0576
-  shareholder: 0.0373
-  strategy: 0.0509
-  trend: 0.0009
+  ashare_specific: 0.0108
+  capital_behavior: 0.0985
+  chip: 0.0295
+  circulate_holder: 0.0295
+  deep_research: 0.035
+  dragon_tiger: 0.0578
+  fundamental: 0.0609
+  holder_concentration: 0.0491
+  institutional: 0.0609
+  leader: 0.0578
+  lockup_risk: 0.0394
+  margin_trading: 0.0578
+  moat: 0.0394
+  national_team: 0.0394
+  news: 0.0689
+  oversold_rebound: 0.0011
+  policy_event: 0.0788
+  quant_behavior: 0.0011
+  relative_strength: 0.005
+  research: 0.0578
+  sector_rotation: 0.0609
+  shareholder: 0.0394
+  strategy: 0.02
+  trend: 0.0012
