@@ -23,14 +23,24 @@ db = StockDatabase()
 bs.login()
 atexit.register(bs.logout)
 
-DATES = ['2026-06-29','2026-06-30','2026-07-01','2026-07-02','2026-07-03',
-         '2026-07-06','2026-07-07','2026-07-08','2026-07-09','2026-07-10',
-         '2026-07-13','2026-07-14','2026-07-15','2026-07-16','2026-07-17',
-         '2026-07-20','2026-07-21','2026-07-22']
+# 默认回测窗口（可用 --start/--end 覆盖）
+DEFAULT_START, DEFAULT_END = '2026-06-29', '2026-07-22'
+WINDOW_START, WINDOW_END = DEFAULT_START, DEFAULT_END
+
+# 逐日模拟的交易日列表，main() 中从K线数据的日期集合推导
+DATES = [DEFAULT_START]
 
 # 预取起始日：回测首日往前约100个自然日，保证 EMA26/MACD/BOLL/MA20 等指标
 # 在回测首日即有足够历史收敛（否则首日因子失真，与实盘打分不一致）。
-PREFETCH_START = (datetime.strptime(DATES[0], "%Y-%m-%d") - timedelta(days=100)).strftime("%Y-%m-%d")
+PREFETCH_START = (datetime.strptime(DEFAULT_START, "%Y-%m-%d") - timedelta(days=100)).strftime("%Y-%m-%d")
+
+
+def _set_window(start: str, end: str):
+    """设置回测窗口（--start/--end），同步预取起点"""
+    global WINDOW_START, WINDOW_END, PREFETCH_START, DATES
+    WINDOW_START, WINDOW_END = start, end
+    DATES = [start]
+    PREFETCH_START = (datetime.strptime(start, "%Y-%m-%d") - timedelta(days=100)).strftime("%Y-%m-%d")
 
 # 加载与实盘同源的权重（config.yaml 为静态先验，不被反馈循环改写）
 _CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
@@ -59,13 +69,15 @@ def _to_float(v, default=0.0):
 # K线本地缓存：全市场预取约需45分钟(baostock限流+断连)，落盘后重跑秒级恢复
 def _kline_cache_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "cache", f"bt_kline_{DATES[0]}_{DATES[-1]}.pkl")
+                        "cache", f"bt_kline_{WINDOW_START}_{WINDOW_END}.pkl")
 
 
 def _load_fetch1year_cache(codes):
     """复用 scripts/fetch_1year_data.py 已落盘的按股K线缓存(cache/klines/*.pkl)。
     文件名为 md5(code)[:16]，格式与 baostock 行一致。
-    仅采用完整覆盖 [PREFETCH_START, DATES[-1]] 的文件。
+    覆盖校验放宽为：首日 <= 窗口起点-85自然日(≈60个交易日，技术指标收敛
+    所需)，且尾部 >= WINDOW_END。原严格校验(PREFETCH_START=窗口前100天)
+    导致 2026 年起的1年缓存对所有更早窗口全部失效。
     code→hash 映射优先读 _code_index.json(由反查工具生成)，否则现场计算。"""
     import hashlib
     kdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "klines")
@@ -78,6 +90,7 @@ def _load_fetch1year_cache(codes):
         except Exception:
             known_codes = None
 
+    min_start = (datetime.strptime(WINDOW_START, "%Y-%m-%d") - timedelta(days=85)).strftime("%Y-%m-%d")
     out = {}
     for code in codes:
         if known_codes is not None and code not in known_codes:
@@ -89,7 +102,7 @@ def _load_fetch1year_cache(codes):
         try:
             with open(p, "rb") as f:
                 rows = pickle.load(f)
-            if rows and rows[0][0] <= PREFETCH_START and rows[-1][0] >= DATES[-1]:
+            if rows and rows[0][0] <= min_start and rows[-1][0] >= WINDOW_END:
                 out[code] = rows
         except Exception:
             continue
@@ -256,14 +269,17 @@ def _load_local_stock_list():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--refresh", action="store_true", help="强制重新预取K线(忽略本地缓存)")
+    ap.add_argument("--start", default=DEFAULT_START, help="回测窗口起点 YYYY-MM-DD")
+    ap.add_argument("--end", default=DEFAULT_END, help="回测窗口终点 YYYY-MM-DD")
     args = ap.parse_args()
+    _set_window(args.start, args.end)
 
     logger.info('%s', '=' * 60)
-    logger.info(f'  Walk-Forward: {DATES[0]} → {DATES[-1]} ({len(DATES)}天)')
+    logger.info(f'  Walk-Forward: {WINDOW_START} → {WINDOW_END}')
     logger.info('%s', '=' * 60)
 
     logger.info('\n[1/4] 获取股票名单')
-    all_stocks = get_stocks(DATES[-1])
+    all_stocks = get_stocks(WINDOW_END)
     if not all_stocks:
         local = _load_local_stock_list()
         if local:
@@ -273,8 +289,16 @@ def main():
         raise SystemExit('无法获取股票名单(baostock不可用且无本地缓存)，中止')
     logger.info(f'  候选: {len(all_stocks)} 只')
 
-    logger.info(f'\n[2/4] 预取K线 ({PREFETCH_START}~{DATES[-1]})')
-    kc = prefetch_with_cache(all_stocks, PREFETCH_START, DATES[-1], refresh=args.refresh)
+    logger.info(f'\n[2/4] 预取K线 ({PREFETCH_START}~{WINDOW_END})')
+    kc = prefetch_with_cache(all_stocks, PREFETCH_START, WINDOW_END, refresh=args.refresh)
+    if not kc:
+        raise SystemExit('未获得任何K线数据，中止')
+
+    # 从K线数据推导窗口内的交易日列表
+    global DATES
+    trade_days = sorted({r[0] for rows in kc.values() for r in rows
+                         if r[0] and WINDOW_START <= r[0] <= WINDOW_END})
+    DATES = trade_days
 
     logger.info('\n[3/4] 逐日模拟')
     for i, d in enumerate(DATES):
