@@ -805,6 +805,17 @@ class PositionManager:
         else:
             multiplier = 1.0
 
+        # ATR 缺失(历史数据不足/获取失败)时退回最大固定百分比止损。
+        # 原实现 atr=0 → stop_loss==entry_price → 开仓当日即被"止损"平仓
+        if not atr or atr <= 0:
+            fallback_pct = self.max_stop_loss_pct or -0.08
+            return {
+                "stop_loss": round(entry_price * (1 + fallback_pct), 2),
+                "stop_loss_pct": round(fallback_pct * 100, 2),
+                "atr_multiplier": 0,
+                "volatility_ratio": 0,
+            }
+
         # 波动率自适应调整：高波动率时放宽止损，低波动率时收紧止损
         if self.volatility_adaptive and volatility_ratio > 0:
             # 波动率翻倍，止损放宽 factor 倍
@@ -836,6 +847,15 @@ class PositionManager:
             multiplier = 2.5
         else:
             multiplier = 2.0
+
+        # ATR 缺失时退回固定百分比止盈(与止损兜底同因：atr=0 → 止盈价==入场价)
+        if not atr or atr <= 0:
+            fallback_pct = 10.0
+            return {
+                "take_profit": round(entry_price * (1 + fallback_pct / 100), 2),
+                "take_profit_pct": fallback_pct,
+                "atr_multiplier": 0,
+            }
 
         take_profit = entry_price + atr * multiplier
         take_profit_pct = (take_profit / entry_price - 1) * 100

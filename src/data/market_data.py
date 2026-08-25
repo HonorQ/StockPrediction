@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import requests
 import re
+import os
 import time
 import atexit
 import threading
@@ -473,12 +474,14 @@ class MarketDataFetcher:
                 host, tx_symbol, start, end, lookback, days
             )
             if df is not None and not df.empty:
+                df = self._supplement_turnover(clean_code, df, days)
                 self._cache_put(cache_key, df)
                 return df
 
         # === 备选: 新浪K线 ===
         df = self._fetch_sina_kline(tx_symbol, days)
         if df is not None and not df.empty:
+            df = self._supplement_turnover(clean_code, df, days)
             self._cache_put(cache_key, df)
             return df
 
@@ -643,17 +646,76 @@ class MarketDataFetcher:
             logger.warning("新浪K线(%s)失败: %s", tx_symbol, e)
             return None
 
-    _turnover_warned = False
+    _TURN_CACHE_TTL = 7 * 86400
 
-    @classmethod
-    def _warn_no_turnover(cls):
-        """备源缺换手率仅告警一次，避免刷屏"""
-        if not cls._turnover_warned:
-            cls._turnover_warned = True
-            logger.warning(
-                "K线备源(腾讯/新浪)无换手率字段，chip筹码衰减/换手异动因子将降级"
-                "(NaN按无衰减处理)。东财主源恢复后自动消除"
-            )
+    def _supplement_turnover(self, clean_code: str, df: pd.DataFrame, days: int) -> pd.DataFrame:
+        """备源K线换手率全缺失时，用 baostock turn 字段按日期补充。
+
+        背景：换手率硬编码0曾导致 chip 筹码衰减/换手异动因子静默失效；
+        现置 NaN 后由此方法恢复真实数据。带本地缓存(7天)避免每日重复拉取；
+        baostock 调用限时 10s，失败静默保持 NaN 不影响主流程。
+        """
+        import pickle
+        import time as _time
+        import concurrent.futures as _cf
+
+        col = "换手率"
+        if col not in df.columns or df[col].notna().any():
+            return df
+        if not clean_code.startswith(("6", "5", "9", "0", "2", "3")):
+            return df  # 北交所等 baostock 不覆盖
+
+        self._warn_no_turnover()
+
+        cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "cache", "turnover")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, f"{clean_code}.pkl")
+
+        def _f(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        turn_map = {}
+        try:
+            if os.path.exists(cache_file):
+                with open(cache_file, "rb") as f:
+                    cached_ts, cached_rows = pickle.load(f)
+                if _time.time() - cached_ts < self._TURN_CACHE_TTL:
+                    turn_map = {r[0]: _f(r[1]) for r in cached_rows if r[1] not in (None, "")}
+            if not turn_map:
+                bs_code = (f"sh.{clean_code}" if clean_code.startswith(("6", "5", "9"))
+                           else f"sz.{clean_code}")
+                start = (datetime.now() - timedelta(days=days + 50)).strftime("%Y-%m-%d")
+                rows_box = []
+
+                def _fetch():
+                    bs = _BaostockConnection.get_connection()
+                    rs = bs.query_history_k_data_plus(
+                        bs_code, "date,turn",
+                        start_date=start,
+                        end_date=datetime.now().strftime("%Y-%m-%d"),
+                        frequency="d", adjustflag="2")
+                    while rs.error_code == "0" and rs.next():
+                        rows_box.append(rs.get_row_data())
+
+                with _cf.ThreadPoolExecutor() as _ex:
+                    _ex.submit(_fetch).result(timeout=10)
+                turn_map = {r[0]: _f(r[1]) for r in rows_box if r[1] not in (None, "")}
+                with open(cache_file, "wb") as f:
+                    pickle.dump((_time.time(), rows_box), f)
+        except Exception as e:
+            logger.debug("换手率补充失败(%s): %s", clean_code, e)
+            return df
+
+        if not turn_map:
+            return df
+        dates = df["日期"].astype(str).str[:10]
+        mask = df[col].isna()
+        df.loc[mask, col] = dates[mask].map(turn_map)
+        return df
 
     @staticmethod
     def _extract_tencent_value(field, default: float = 0.0) -> float:
