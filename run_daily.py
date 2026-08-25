@@ -1508,7 +1508,9 @@ def run_premarket(config):
 
     # 生成盘前报告
     reporter = ReportGenerator()
-    history = db.get_recent_recommendations(days=14)
+    # 回顾表排除回测行(与午后模式同口径，每日一条最终推荐)
+    history = db.get_recent_recommendations(
+        days=14, modes=("afternoon", "premarket", "feedback_training"))
     report_content = reporter.generate_report(
         recommendations=recommendations,
         market_overview=index_data,
@@ -2157,7 +2159,11 @@ def run_afternoon(config):
             },
         })
 
-    history = db.get_recent_recommendations(days=14)
+    # 报告历史回顾：每日一次推荐口径。
+    # 只含盘前类模式(afternoon/premarket/历史feedback_training)，排除回测(backtest)行——
+    # 否则跨窗口基线的回测推荐会污染回顾表；同日多行由 reporter 按 afternoon 优先去重为1条
+    history = db.get_recent_recommendations(
+        days=14, modes=("afternoon", "premarket", "feedback_training"))
     report_content = reporter.generate_report(
         recommendations=recommendations,
         market_overview=index_data,

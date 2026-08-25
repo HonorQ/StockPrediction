@@ -19,27 +19,30 @@ class ReportGenerator:
     # ------------------------------------------------------------------
     # 公共接口
     # ------------------------------------------------------------------
-    # 三档报告身份标注：明确"哪份报告才是买入依据"，消除多时点推荐的决策困惑
+    # 报告身份标注。
+    # 决策流程已收敛为"每日一次"：14:40 午后版是当日唯一的正式推荐与买入依据；
+    # 盘前(research)/盘中(warning)仅为过程产物，不再构成独立的推荐记录
+    # （历史回顾表也按"每天一条最终推荐"展示，见 _build_history）
     REPORT_ROLES = {
         "research": {
             "title_suffix": "· 盘前研究池",
             "banner_title": "研究池说明",
-            "banner": ("本报告为 07:00 盘前全量因子计算产出的观察候选池，非买入依据。"
-                       "买入决策以 14:40 午后《尾盘最终决策版》为准。"),
+            "banner": ("本报告为 07:00 盘前全量因子计算产出的观察候选池，非买入依据、不构成当日推荐。"
+                       "当日唯一正式推荐以 14:40 午后《每日推荐》为准。"),
             "bg": "#eef2f6", "border": "#7a8ba3", "color": "#3f4c63",
         },
         "warning": {
             "title_suffix": "· 盘中预警(非买入依据)",
             "banner_title": "盘中预警",
             "banner": ("09:25 盘中仅负责：崩盘清仓检测、不可交易标记(涨跌停)、高风险票预警。"
-                       "本报告不含推荐列表，买入决策以 14:40 午后《尾盘最终决策版》为准。"),
+                       "本报告不含推荐列表，当日唯一正式推荐以 14:40 午后《每日推荐》为准。"),
             "bg": "#fdf3e0", "border": "#e0a800", "color": "#8a6d1a",
         },
         "final": {
-            "title_suffix": "· 尾盘最终决策版",
-            "banner_title": "最终决策",
-            "banner": ("本报告为 14:40 尾盘最终决策版：已经全天真实走势/主力资金流验证，"
-                       "是当日唯一的买入依据。请于 14:45-14:55 间完成下单。"),
+            "title_suffix": "· 每日推荐(14:40)",
+            "banner_title": "今日推荐",
+            "banner": ("本报告为每日 14:40 生成的唯一正式推荐：基于全天真实走势/主力资金流验证，"
+                       "按 T+1~T+3 持有口径选股。下单窗口 14:45-14:55(收盘竞价前)。"),
             "bg": "#e9f5ec", "border": "#3d9153", "color": "#25603a",
         },
     }
@@ -921,8 +924,10 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
     def _build_history(self, history_records: List[Dict]) -> str:
         if not history_records:
             return ""
-        # 按日期分组：覆盖最近 N 天、每天最多2条，避免单日多条推荐占满回顾表
-        # （8/14 案例：同一天盘前+午后产生 9 条推荐，旧的 [:10] 直接挤掉其他天）
+        # 每日一次推荐口径：每天只展示一条最终推荐。
+        # 过渡期同一天可能存在 afternoon + 旧盘前行，优先展示 afternoon 模式行；
+        # （8/14 案例：旧"每日两次"设计下单日 9 条推荐挤占回顾表，
+        #   先改为每日2条；决策流程收敛为每日一次后进一步收敛为每日1条）
         from collections import defaultdict
         by_date = defaultdict(list)
         for h in history_records:
@@ -932,7 +937,10 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
         days = sorted(by_date.keys(), reverse=True)[:7]
         rows = []
         for d in days:
-            recs = sorted(by_date[d], key=lambda x: x.get("score", 0), reverse=True)[:2]
+            recs = sorted(
+                by_date[d],
+                key=lambda x: (x.get("mode") != "afternoon", -x.get("score", 0)),
+            )[:1]
             for h in recs:
                 d1 = f'{h.get("d1_return", 0):+.1f}%' if h.get("d1_return") is not None else "-"
                 d3 = f'{h.get("d3_return", 0):+.1f}%' if h.get("d3_return") is not None else "-"

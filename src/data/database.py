@@ -474,14 +474,26 @@ class StockDatabase:
                 params
             )
 
-    def get_recent_recommendations(self, days: int = 30) -> List[Dict]:
+    def get_recent_recommendations(self, days: int = 30,
+                                   modes: List[str] = None) -> List[Dict]:
+        """取最近 N 天推荐。
+        modes: 提供时只返回指定模式(如报告回顾用 ("afternoon","premarket","feedback_training")
+               排除回测行)；None=不过滤(旧行为)。"""
         with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-            rows = conn.execute(
-                """SELECT * FROM recommendations WHERE trade_date >= ?
-                   ORDER BY trade_date DESC, rank ASC""", (cutoff,)
-            ).fetchall()
+            if modes:
+                placeholders = ",".join("?" for _ in modes)
+                rows = conn.execute(
+                    f"""SELECT * FROM recommendations WHERE trade_date >= ?
+                        AND (mode IN ({placeholders}) OR mode IS NULL)
+                        ORDER BY trade_date DESC, rank ASC""", (cutoff, *modes)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM recommendations WHERE trade_date >= ?
+                       ORDER BY trade_date DESC, rank ASC""", (cutoff,)
+                ).fetchall()
         return [dict(r) for r in rows]
 
     def get_recommendation_history(self, code: str, days: int = 60) -> List[Dict]:
