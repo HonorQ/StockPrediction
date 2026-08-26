@@ -47,6 +47,20 @@ def run_factor_ic(config):
         print(f"  📊 当前可用数据: {factor_data.shape if hasattr(factor_data, 'shape') else '0'}")
         return
 
+    # 只保留数值列: 原始factors JSON里的 signals(list)/events(dict) 字段
+    # 会让 rank().corr() 抛 unhashable type 错误
+    import pandas as pd
+    drop_cols = ["date", "stock_code", "trade_date", "code"]
+    numeric_cols = [c for c in factor_data.columns
+                    if c not in drop_cols
+                    and pd.api.types.is_numeric_dtype(factor_data[c])
+                    and c != "future_return"]
+    kept = numeric_cols + ["future_return"]
+    dropped = len(factor_data.columns) - len(kept)
+    factor_data = factor_data[kept]
+    if dropped:
+        print(f"  (已忽略 {dropped} 个非数值列)")
+
     print(f"  📊 加载因子截面数据: {len(factor_data)} 条")
     print()
 
