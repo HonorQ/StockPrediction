@@ -27,6 +27,9 @@ import pandas as pd
 NEG_DIMS = ["trend", "strategy", "chip", "relative_strength",
             "capital_behavior", "ashare_specific"]
 POS_DIMS = ["quant_behavior", "oversold_rebound"]
+# 经典K线因子扩展(2026-08): rev20/open_gap 强正; pos_250/max20 强负
+POS_DIMS_V2 = POS_DIMS + ["rev20", "open_gap", "deep_research"]
+NEG_DIMS_V2 = NEG_DIMS + ["pos_250", "max20"]
 
 
 def zscore(s: pd.Series) -> pd.Series:
@@ -46,6 +49,15 @@ def build_signals(panel: pd.DataFrame) -> pd.DataFrame:
     pos_cols = [f"z_{c}" for c in POS_DIMS]
     df["reversal6"] = -df[neg_cols].mean(axis=1)
     df["positive2"] = df[pos_cols].mean(axis=1)
+    # v2 合成: 纳入经典因子(全市场IC终审显著者)
+    have_pos = [c for c in POS_DIMS_V2 if f"z_{c}" in df.columns]
+    have_neg = [c for c in NEG_DIMS_V2 if f"z_{c}" in df.columns]
+    df["positive_v2"] = df[have_pos].mean(axis=1)
+    if have_neg:
+        df["alpha_v2"] = df.groupby("date", group_keys=False).apply(
+            lambda g: zscore(g["positive_v2"]) - zscore(g[have_neg].mean(axis=1)))
+    else:
+        df["alpha_v2"] = df["positive_v2"]
     # 合成：两信号各自按日标准化后相加
     df["alpha_comb"] = df.groupby("date", group_keys=False).apply(
         lambda g: zscore(g["reversal6"]) + zscore(g["positive2"]))
@@ -110,7 +122,8 @@ def main():
 
     df = build_signals(panel)
 
-    signals = NEG_DIMS + POS_DIMS + ["reversal6", "positive2", "alpha_comb"]
+    signals = (NEG_DIMS + POS_DIMS + ["reversal6", "positive2", "alpha_comb"]
+               + ["positive_v2", "alpha_v2"])
     results = []
     for sig in signals:
         for ret_col in ("fwd3", "fwd5", "fwd10"):
