@@ -645,3 +645,55 @@ class StockScorer:
     def _score_circulate_holder(self, f: Dict) -> float:
         circulate_score = f.get("circulate_score", 50)
         return max(0, min(100, float(circulate_score)))
+
+def apply_alpha_overlay(candidates: List[Dict], config: Dict) -> None:
+    """positive2 合成信号 overlay：对最终得分施加 alpha 调整。
+
+    boost = clip(weight * (z_quant + z_oversold)/2, ±cap)
+    直接修改 candidates 各项的 score，并记录 alpha_boost 字段供报告展示。
+    """
+    cfg = config.get("alpha_overlay") or {}
+    if not cfg.get("enabled", True):
+        return
+    weight = float(cfg.get("weight", 3.0))
+    cap = float(cfg.get("cap", 6.0))
+
+    applied = 0
+    for c in candidates:
+        zs = c.get("z_scores") or {}
+        zq = zs.get("quant_behavior", 0) or 0
+        zo = zs.get("oversold_rebound", 0) or 0
+        boost = max(-cap, min(cap, weight * (zq + zo) / 2.0))
+        if abs(boost) < 0.05:
+            continue
+        c["score"] = round(max(0, min(100, float(c["score"]) + boost)), 1)
+        c["alpha_boost"] = round(boost, 2)
+        applied += 1
+    if applied:
+        logging.getLogger("stock_prediction").info(
+            "Alpha overlay 已应用 %d 只 (weight=%.1f cap=%.1f)", applied, weight, cap)
+
+
+def apply_chip_guard(candidates: List[Dict], config: Dict) -> List[Dict]:
+    """chip 风控排除器：剔除截面 chip z-score 过高的票(获利盘沉重→跑输)。
+
+    返回过滤后的列表；被剔除项带 guard_reason 字段供日志/报告说明。
+    """
+    cfg = config.get("chip_guard") or {}
+    if not cfg.get("enabled", True):
+        return candidates
+    threshold = float(cfg.get("z_threshold", 1.5))
+    kept, excluded = [], []
+    for c in candidates:
+        zc = (c.get("z_scores") or {}).get("chip", 0) or 0
+        if zc > threshold:
+            c["guard_reason"] = f"获利盘压力(chip_z={zc:.2f}>{threshold})"
+            excluded.append(c)
+        else:
+            kept.append(c)
+    if excluded:
+        logging.getLogger("stock_prediction").warning(
+            "Chip guard 剔除 %d 只获利盘压力票(z>%.1f): %s",
+            len(excluded), threshold,
+            ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))
+    return kept

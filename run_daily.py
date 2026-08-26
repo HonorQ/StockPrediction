@@ -1352,6 +1352,11 @@ def run_premarket(config):
         print(f"  (动态正交化 {len(dynamic_pairs)} 对已加载)")
     StockScorer.batch_normalize(scored_stocks, weights, extra_ortho_pairs=dynamic_pairs)
 
+    # === Alpha overlay + Chip 风控排除(全市场分层验证产物, 实盘/回测同口径) ===
+    from src.engine.scorer import apply_alpha_overlay, apply_chip_guard
+    apply_alpha_overlay(scored_stocks, config)
+    scored_stocks = apply_chip_guard(scored_stocks, config)
+
     # 信号筛选
     print("  --- 第二层: 信号强度筛选 ---")
     qualified = screener.filter_signal_strength(

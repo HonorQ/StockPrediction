@@ -190,3 +190,13 @@ signal_invert:
   - bull
   note: 'A/B实验结论(2026-08): neutral窗口反转d10超额+1.87 vs 基线-4.12; bull窗口+2.21 vs +1.72;
     bear窗口反转更差(-3.21)故不启用。样本仅3窗口,建议影子模式运行1个月复核后转正'
+alpha_overlay:
+  enabled: true
+  weight: 3.0
+  cap: 6.0
+  note: 'positive2合成信号overlay: z(quant)+z(oversold)加权调整最终分。依据 quantile_analysis.json
+    h10 Q10-Q1=+69bp/日 t=+2.90'
+chip_guard:
+  enabled: true
+  z_threshold: 1.5
+  note: '获利盘压力排除器: 截面chip_z>阈值剔除(分层t=-3.06全场最强负信号)'
