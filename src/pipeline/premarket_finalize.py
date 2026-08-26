@@ -15,6 +15,18 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 from src.utils.log import get_logger
 
 logger = get_logger()
+from src.engine.backtest import ATRStopLoss, PositionManager
+from src.engine.reporter import ReportGenerator
+from src.data.database import StockDatabase
+from src.engine.scorer import StockScorer
+from src.engine.entry_risk_filter import (
+    _filter_high_risk_entries)
+from src.engine.paper_trade_ops import (
+    _update_open_paper_trades, _fetch_close_price_on_date)
+from src.pipeline.common import _pack
+from src.pipeline.common import save_cache
+from src.pipeline.common import write_summary
+
 
 def _pm_guard(ctx):
     (
@@ -742,3 +754,16 @@ def _pm_feedback(ctx):
     print("=" * 60)
     _pack(ctx, dict(locals()))
     ctx["config"] = config
+
+
+def _pm_persist(ctx):
+    """候选池缓存 + DB保存推荐 + 开纸面仓 + 收益回填 + 报告生成 编排器。"""
+    _pm_persist_stage1(ctx)
+    _pm_p2s1(ctx)
+    _pm_p2s2(ctx)
+    _pm_persist_stage2(ctx)
+    _pm_p3s1(ctx)
+    _pm_p3s2(ctx)
+    _pm_persist_stage3(ctx)
+    _pm_persist_stage4(ctx)
+

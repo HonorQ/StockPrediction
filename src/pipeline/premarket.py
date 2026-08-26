@@ -16,12 +16,48 @@ from src.utils.log import get_logger
 
 logger = get_logger()
 
+from src.factors.ashare_specific import AShareCharacteristics, SentimentCycle, HotMoneyTracker
+from src.engine.backtest import ATRStopLoss, PositionManager
+from src.factors.capital_behavior import CapitalBehaviorFactor
+from src.factors.chip import ChipDistribution
+from src.factors.circular_holder import CirculateHolderFactor
+from src.factors.deep_research import DeepResearchFactor
+from src.factors.expectation_pricing import ExpectationPricing, NewsEventAnalyzer, ProfitTakingDetector
+from src.factors.fundamental import FundamentalFactors
+from src.factors.holder_concentration import HolderConcentrationFactor
+from src.factors.institutional import InstitutionalFactors
+from src.factors.macro_event import MacroEventDetector
+from src.factors.ashare_extended import MarginTradingFactor, ShareholderChangeFactor, LockUpExpiryFactor, SeasonalityFactor, LimitUpQualityFactor
+from src.data.market_data import MarketDataFetcher
+from src.factors.money_flow_factor import MoneyFlowFactors
+from src.data.money_flow import MoneyFlowFetcher
+from src.factors.national_team import NationalTeamFactor
+from src.factors.news_factor import NewsFactor
+from src.data.news_fetcher import NewsFetcher
+from src.factors.policy_event import PolicyEventFactor
+from src.factors.popularity import PopularityFactors
+from src.factors.quant_behavior import QuantBehaviorDetector
+from src.factors.rebound_analysis import ReboundSustainability, NextDayPredictor
+from src.factors.relative_strength import RelativeStrength
+from src.factors.phase2_market_intel import SectorLinkage, MoneyFlowContinuity, InstitutionalResearch, DragonTigerBoard, SectorLeader
+from src.factors.sector_rotation import SectorRotation, OversoldReboundStrategy
+from src.factors.sentiment import SentimentFactors
+from src.data.database import StockDatabase
+from src.engine.scorer import StockScorer
+from src.engine.screener import StockScreener
+from src.pipeline.common import _Ctx
+from src.pipeline.common import _cleanup_cache
+from src.pipeline.common import _log_source_health
+from src.pipeline.common import _pack
+from src.utils.heartbeat import check_task_alerts
+
+
 # 阶段实现位于同目录各模块:
 from src.pipeline.premarket_data import _pm_mkt, _pm_sent  # noqa: F401
 from src.pipeline.premarket_deep import (  # noqa: F401
     _pm_screen, _pm_quick_topn, _calc_one_stock, _pm_deep_loop)
 from src.pipeline.premarket_finalize import (  # noqa: F401
-    _pm_guard, _pm_feedback)
+    _pm_guard, _pm_feedback, _pm_persist)
 
 
 

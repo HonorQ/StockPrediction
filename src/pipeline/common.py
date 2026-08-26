@@ -582,3 +582,25 @@ def load_config() -> dict:
     config_path = os.path.join(ROOT, "config.yaml")
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+# ======================================================================
+# 阶段化流水线的状态容器与回写工具(premarket 等使用)
+# ======================================================================
+class _Ctx(dict):
+    """阶段间状态容器。
+
+    unpack 对缺失键返回 None——首阶段解包未初始化名时,
+    由原代码立即重新赋值, 语义与原局部变量一致。
+    """
+
+    def unpack(self, *names):
+        return tuple(self.get(n) for n in names)
+
+
+def _pack(ctx, local_vars):
+    """阶段结束时把局部状态写回 ctx(排除私有/参数名)。"""
+    for k, v in local_vars.items():
+        if not k.startswith('_') and k not in ('ctx', 'config'):
+            ctx[k] = v
+

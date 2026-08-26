@@ -14,8 +14,14 @@ if ROOT not in sys.path:
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from src.utils.log import get_logger
+from src.pipeline.common import _prefetch_history_and_flow
 
 logger = get_logger()
+from src.factors.moat import MoatFactors
+from src.factors.strategies import StockStrategies
+from src.factors.technical import TechnicalFactors
+from src.pipeline.common import _pack
+
 
 def _pm_screen(ctx):
     """硬性条件筛选: ST/停牌/板块排除"""
