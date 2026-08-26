@@ -1260,6 +1260,7 @@ def run_premarket(config):
 
     final.sort(key=lambda x: x["score"], reverse=True)
     max_rec = filter_cfg.get("max_recommend", 2)
+    health_note = None  # 策略健康度警示(有值时注入报告横幅)
 
     # === 大盘择时层：缩减推荐数 + bear/crash 空仓（评估与权重切换已在 5.2 完成）===
     try:
@@ -1281,7 +1282,8 @@ def run_premarket(config):
     # === 策略健康度层：自身推荐滚动收益持续负超额时自动降仓(风格失效自保) ===
     try:
         from src.engine.strategy_health import assess_strategy_health, apply_action
-        health = assess_strategy_health(db, today=today,
+        _health_today = datetime.now().strftime("%Y-%m-%d")
+        health = assess_strategy_health(db, today=_health_today,
                                         config=filter_cfg.get("strategy_health"))
         if health.get("status") == "degraded":
             before_health = max_rec
@@ -1290,7 +1292,7 @@ def run_premarket(config):
                         f"胜率{health['win_rate']}% / 平均d5 {health['avg_d5']:+.2f}% "
                         f"→ 推荐上限 {before_health} → {max_rec}")
             print(f"  🩺 {warn_txt}")
-            intraday_note = (intraday_note or "") + f"【{warn_txt}】"
+            health_note = health_note + f"【{warn_txt}】" if health_note else f"【{warn_txt}】"
         else:
             print(f"  🩺 策略健康度: {health.get('status')} "
                   f"(样本{health.get('samples', 0)})")
@@ -1554,6 +1556,7 @@ def run_premarket(config):
         rotation_data=rotation_data,
         history_records=history,
         report_role="research",
+        intraday_note=health_note,
     )
     report_path = reporter.save_report(report_content)
     print(f"  ✅ 盘前报告已生成: {report_path}")
