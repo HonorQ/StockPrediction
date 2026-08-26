@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """入场风险过滤：追涨/套牢盘/量价背离/低开概率拦截 + 盘中信号刷新。"""
-import io as _io_unused  # placeholder 保持 import 区整洁
 import re
 
 from src.utils.log import get_logger
@@ -15,7 +14,6 @@ def _filter_high_risk_entries(stocks: list, filter_cfg: dict) -> list:
     - 量价背离(价涨量缩/放量滞涨) → 假反弹风险
     这些信号系统已算出但之前未用作过滤,导致7-23/7-24/7-28的9笔交易平均亏损-7.47%。
     """
-    import re
     risk_cfg = filter_cfg.get("entry_risk", {})
     max_gap_prob = risk_cfg.get("max_gap_open_prob", 70)
     block_high_chip = risk_cfg.get("block_high_chip", True)

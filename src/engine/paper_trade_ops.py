@@ -5,7 +5,7 @@
 依赖注入式设计——db/market_fetcher 由调用方传入, 本模块不建连接。
 """
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pandas as pd
 
@@ -55,7 +55,6 @@ def _update_open_paper_trades(db, market_fetcher, trade_cfg: dict, today: str):
         - 持仓超过 hold_days → 到期平仓
     持仓期间的最大回撤/最大浮盈也会更新。
     """
-    import json
     open_trades = db.get_open_paper_trades()
     if not open_trades:
         return
@@ -264,40 +263,6 @@ def _check_crash_and_close_positions(fresh, config):
     except Exception as e:
         print(f"  ⚠️ 崩盘清仓失败: {e}")
 
-from src.data.market_data import MarketDataFetcher
-from src.data.source_health import health_check, summarize
-from src.data.money_flow import MoneyFlowFetcher
-from src.data.news_fetcher import NewsFetcher
-from src.data.hot_stocks import HotStocksFetcher
-from src.data.concept_map import ConceptMap
-from src.factors.technical import TechnicalFactors
-from src.factors.money_flow_factor import MoneyFlowFactors
-from src.factors.sentiment import SentimentFactors
-from src.factors.news_factor import NewsFactor
-from src.factors.strategies import StockStrategies
-from src.factors.chip import ChipDistribution
-from src.factors.fundamental import FundamentalFactors
-from src.factors.popularity import PopularityFactors
-from src.factors.institutional import InstitutionalFactors
-from src.factors.relative_strength import RelativeStrength
-from src.factors.sector_rotation import SectorRotation, OversoldReboundStrategy
-from src.factors.rebound_analysis import ReboundSustainability, NextDayPredictor
-from src.factors.expectation_pricing import ExpectationPricing, NewsEventAnalyzer, ProfitTakingDetector
-from src.factors.ashare_specific import AShareCharacteristics, SentimentCycle, HotMoneyTracker
-from src.factors.ashare_extended import MarginTradingFactor, ShareholderChangeFactor, LockUpExpiryFactor, SeasonalityFactor, LimitUpQualityFactor
-from src.factors.phase2_market_intel import SectorLinkage, MoneyFlowContinuity, InstitutionalResearch, DragonTigerBoard, SectorLeader
-from src.factors.quant_behavior import QuantBehaviorDetector
-from src.factors.deep_research import DeepResearchFactor
-from src.factors.policy_event import PolicyEventFactor
-from src.factors.macro_event import MacroEventDetector
-from src.factors.capital_behavior import CapitalBehaviorFactor
-from src.factors.national_team import NationalTeamFactor
-from src.factors.holder_concentration import HolderConcentrationFactor
-from src.factors.circular_holder import CirculateHolderFactor
-from src.engine.screener import StockScreener
-from src.engine.scorer import StockScorer
-from src.engine.reporter import ReportGenerator
-from src.engine.backtest import ATRStopLoss, PositionManager
 from src.data.database import StockDatabase
 
 
