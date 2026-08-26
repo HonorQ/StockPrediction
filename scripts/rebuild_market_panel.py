@@ -15,7 +15,7 @@
   - Rank IC：按截面日 spearman，输出均值/ICIR/t统计/正IC占比
 
 用法: python scripts/rebuild_market_panel.py [--workers 6] [--fresh]
-输出: reports/market_panel.csv (断点续存) + reports/market_ic_verdict.json
+输出: reports/market_panel_daily.csv (断点续存) + reports/market_ic_verdict.json
 """
 import os
 import sys
@@ -29,8 +29,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-PANEL_PATH = os.path.join(ROOT, "reports", "market_panel.csv")
-SECTION_STEP = 5          # 每 N 个交易日一个截面
+PANEL_PATH = os.path.join(ROOT, "reports", "market_panel_daily.csv")
+SECTION_STEP = 1          # 每 N 个交易日一个截面
 FWD_HORIZONS = (3, 5, 10)
 
 # ---- worker 全局(lazy init, spawn 后每进程加载一次) ----

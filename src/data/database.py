@@ -358,6 +358,27 @@ class StockDatabase:
                 CREATE INDEX IF NOT EXISTS idx_mss_date ON ml_shadow_scores(trade_date)
             """)
 
+            # 集合竞价快照：9:25 盘中模式落库，为竞价强度因子积累 IC 样本
+            # (量比=竞价强度核心字段; open_pct 9:25时刻的涨跌幅即开盘涨幅)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS auction_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    name TEXT DEFAULT '',
+                    open_price REAL,
+                    open_pct REAL,
+                    volume_ratio REAL,
+                    turnover REAL,
+                    amount REAL,
+                    captured_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_auction_date_code
+                ON auction_snapshots(trade_date, code)
+            """)
+
 
     def _migrate_schema(self):
         """幂等迁移：把 18 维子评分提升为 factor_snapshots 的独立列，并补建复合索引。
@@ -934,6 +955,36 @@ class StockDatabase:
     # ==================================================================
     # 反馈机制：归因记录
     # ==================================================================
+    # ==================================================================
+    # 集合竞价快照（竞价强度因子的数据积累）
+    # ==================================================================
+    def save_auction_snapshot(self, trade_date: str, rows: list) -> int:
+        """批量落库竞价快照。rows: [{code,name,open_price,open_pct,volume_ratio,turnover,amount}]
+        同日同码幂等覆盖(唯一索引兜底)。返回写入行数。"""
+        if not rows:
+            return 0
+        with self._connection() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO auction_snapshots
+                   (trade_date, code, name, open_price, open_pct,
+                    volume_ratio, turnover, amount)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                [(trade_date,
+                  r.get("code", ""), r.get("name", ""),
+                  r.get("open_price"), r.get("open_pct"),
+                  r.get("volume_ratio"), r.get("turnover"), r.get("amount"))
+                 for r in rows])
+            return len(rows)
+
+    def get_auction_snapshots(self, days: int = 120) -> list:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            rows = conn.execute(
+                "SELECT * FROM auction_snapshots WHERE trade_date >= ?"
+                " ORDER BY trade_date, volume_ratio DESC", (cutoff,)).fetchall()
+        return [dict(r) for r in rows]
+
     # ==================================================================
     # 日K线落库（离线回测数据基建）
     # ==================================================================
