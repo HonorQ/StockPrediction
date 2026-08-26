@@ -23,11 +23,12 @@ class StockScorer:
         ("deep_research", "chip"),            # 深度研究与筹码共享60日高低点位置
     ]
 
-    # IC 校准显示负贡献的因子维度(2026-01~08 面板, 5757行):
-    # trend IC=-0.035(t=-2.0) / strategy=-0.022 / quant_behavior=-0.020。
-    # invert_signals=True 时对这些维度取反(100-x)，用于"追涨→低吸"反转假设的
-    # A/B 回测验证；生产是否启用须以跨窗口回测结论为准
-    NEGATIVE_IC_DIMS = ("trend", "strategy", "quant_behavior")
+    # IC 校准结论(2026-08 全市场终审 reports/market_ic_verdict.json,
+    # 5273只×37截面, 无幸存者偏差):
+    #   trend 持续负(h10 t=-1.5边缘) → 反转实验保留
+    #   strategy 全市场无信号 → 反转意义有限, 保留观察
+    #   quant_behavior 全市场显著正(+0.038, t=+2.2)! 曾因小样本误判为负
+    NEGATIVE_IC_DIMS = ("trend", "strategy")
 
     def __init__(self, weights: Dict[str, float] = None,
                  invert_signals: bool = False):
@@ -431,10 +432,12 @@ class StockScorer:
     def _score_quant_behavior(self, f: Dict) -> float:
         """量化行为评分。
 
-        旧实现把检测到量化风险(high/闪崩/对倒)反向加分(+30/+20)，依据是样本内
-        "低分预测正确率70.4%"——典型 data snooping，且与报告层将 quant_risk=high
-        标 🚫 风险警示直接矛盾。现改为常识性防御方向：操纵类信号扣分、
-        其余中性；待积累足够 IC 数据后再校准方向。
+        方向依据全市场大样本 IC 终审(2026-08, 5273只×37截面):
+        quant_behavior IC=+0.032/+0.038(h5/h10), t≈+2.1 显著正——
+        检测到量化异动的股票整体后续表现更好(游资/量化活跃=关注度)。
+        曾以"常识+报告矛盾"改为防御扣分，被大样本证据推翻，现恢复正向，
+        但对明确破坏性信号(闪崩/天地板)保留适度减分。
+        报告层 🚫 标记保留(提示博弈风险)，与评分层职责分离。
         """
         score = 50
 
@@ -442,21 +445,23 @@ class StockScorer:
         quant_signals = f.get("quant_signals", [])
 
         if quant_risk == "high":
-            score -= 25
+            score += 20
         elif quant_risk == "medium":
-            score -= 10
+            score += 10
 
         for signal in quant_signals:
             if "闪崩" in signal or "天地板" in signal:
-                score -= 15          # 巨量下跌/极端振幅：明确风险
-            elif "对倒" in signal or "诱多" in signal or "诱空" in signal:
-                score -= 12          # 操纵痕迹
-            elif "尾盘" in signal:
-                score -= 8           # 尾盘操控
+                score -= 12          # 唯一保留的防御项:极端破坏性信号
             elif "秒板" in signal:
-                score -= 5           # 抢筹/出货皆可能，轻度减分
+                score += 10
+            elif "尾盘" in signal:
+                score += 8
+            elif "对倒" in signal or "诱多" in signal:
+                score += 8
+            elif "动量追逐" in signal:
+                score += 8
             elif "涨停未封住" in signal:
-                score -= 8           # 封板失败抛压
+                score -= 3
 
         return max(0, min(100, score))
 

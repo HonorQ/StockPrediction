@@ -19,12 +19,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 
 class TestQuantBehaviorScoring(unittest.TestCase):
-    def test_high_risk_no_longer_adds_score(self):
+    def test_high_risk_adds_score_per_market_ic(self):
+        """全市场IC终审(2026-08): quant_behavior显著正(+0.038,t=2.2)
+        → 检测到量化异动应加分(游资活跃=关注度),仅闪崩类破坏信号减分"""
         from src.engine.scorer import StockScorer
         s = StockScorer()
         risky = {"quant_risk": "high",
-                 "quant_signals": ["闪崩", "大单对倒"]}
-        self.assertLess(s._score_quant_behavior(risky), 50)
+                 "quant_signals": ["大单对倒", "秒板"]}
+        self.assertGreater(s._score_quant_behavior(risky), 50)
+
+    def test_flash_crash_still_penalized(self):
+        from src.engine.scorer import StockScorer
+        s = StockScorer()
+        crash = {"quant_risk": "low", "quant_signals": ["盘中闪崩"]}
+        self.assertLess(s._score_quant_behavior(crash), 50)
 
     def test_clean_stock_neutral(self):
         from src.engine.scorer import StockScorer

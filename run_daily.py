@@ -527,6 +527,63 @@ from src.data.database import StockDatabase
 CACHE_DIR = os.path.join(ROOT, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+HEARTBEAT_PATH = os.path.join(ROOT, "logs", "heartbeat.json")
+# 允许的最大静默天数(覆盖长假)：超过则视为任务失联
+HEARTBEAT_MAX_GAP_DAYS = 5
+
+
+def _write_heartbeat(mode: str, status: str = "ok", error: str = None):
+    """记录各模式最近一次运行状态。失败告警的数据基础。"""
+    try:
+        data = {}
+        if os.path.exists(HEARTBEAT_PATH):
+            with open(HEARTBEAT_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        data[mode] = {
+            "last_run": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": status,
+            "error": (error or "")[:300],
+        }
+        with open(HEARTBEAT_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass  # 心跳失败绝不影响主流程
+
+
+def check_task_alerts(modes=("premarket", "intraday", "afternoon"),
+                      max_gap_days: int = HEARTBEAT_MAX_GAP_DAYS) -> list:
+    """检测历史运行异常，返回告警文本列表。
+    检测: 上次运行失败 / 超过 max_gap_days 无成功心跳。"""
+    alerts = []
+    try:
+        if not os.path.exists(HEARTBEAT_PATH):
+            return ["无任何心跳记录(logs/heartbeat.json 不存在)"]
+        with open(HEARTBEAT_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        now = datetime.now()
+        for m in modes:
+            info = data.get(m)
+            if not info:
+                alerts.append(f"{m}: 从未有心跳记录")
+                continue
+            if info.get("status") == "running":
+                # running 超过1天视为上次进程异常退出
+                pass
+            if info.get("status") not in ("ok", "running"):
+                err = (info.get("error") or "")[:80]
+                alerts.append(f"{m}: 上次运行失败 [{info.get('last_run')}] {err}")
+                continue
+            try:
+                last = datetime.strptime(info["last_run"], "%Y-%m-%d %H:%M:%S")
+                gap = (now - last).days
+                if gap > max_gap_days:
+                    alerts.append(f"{m}: 已 {gap} 天无成功运行(上次 {info['last_run']})")
+            except (KeyError, ValueError):
+                pass
+    except Exception as e:
+        logger.warning("心跳检测失败: %s", e)
+    return alerts
+
 
 def load_config() -> dict:
     config_path = os.path.join(ROOT, "config.yaml")
@@ -639,6 +696,14 @@ def run_premarket(config):
     print(f"  运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
     _t0 = datetime.now()
+
+    # 失败告警：检测历史运行异常(上次失败/长期静默)，注入报告横幅
+    health_note = None
+    _alerts = check_task_alerts()
+    if _alerts:
+        for a in _alerts:
+            print(f"  🚨 运维告警: {a}")
+        health_note = "🚨 " + "; ".join(_alerts)
 
     _log_source_health()
     _cleanup_cache(days=7)
@@ -1260,7 +1325,7 @@ def run_premarket(config):
 
     final.sort(key=lambda x: x["score"], reverse=True)
     max_rec = filter_cfg.get("max_recommend", 2)
-    health_note = None  # 策略健康度警示(有值时注入报告横幅)
+    # health_note 可能已被运维告警初始化(见 run_premarket 开头)
 
     # === 大盘择时层：缩减推荐数 + bear/crash 空仓（评估与权重切换已在 5.2 完成）===
     try:
@@ -1901,6 +1966,12 @@ def run_afternoon(config):
 
     _log_source_health()
 
+    # 失败告警：盘前/盘中异常时午后报告显著提示
+    afternoon_alerts = check_task_alerts()
+    if afternoon_alerts:
+        for a in afternoon_alerts:
+            print(f"  🚨 运维告警: {a}")
+
     today = datetime.now().strftime("%Y-%m-%d")
     cache = load_cache(f"premarket_{today}.json")
     if cache is None:
@@ -2135,6 +2206,8 @@ def run_afternoon(config):
 
     # === 策略健康度层(与盘前同口径)：风格失效时收紧午后推荐上限 ===
     afternoon_health_note = None
+    if afternoon_alerts:
+        afternoon_health_note = "🚨 " + "; ".join(afternoon_alerts)
     try:
         from src.engine.strategy_health import assess_strategy_health, apply_action
         db_h = StockDatabase()
@@ -2393,7 +2466,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="股票预测系统")
     parser.add_argument("--premarket", action="store_true", help="盘前模式：全量因子计算（建议7:00-8:00运行）")
     parser.add_argument("--intraday", action="store_true", help="盘中模式：基于盘前缓存快速修正（建议9:25运行）")
-    parser.add_argument("--afternoon", action="store_true", help="午后模式：基于全天真实成交+资金流向深度修正（建议14:40运行，尾盘最终决策）")
+    parser.add_argument("--afternoon", action="store_true", help="午后模式：基于全天真实成交/资金流向深度修正（建议14:40运行，尾盘最终决策）")
     parser.add_argument("--factor-ic", action="store_true", help="因子IC评估：从数据库加载历史数据计算因子IC")
     parser.add_argument("--lookback", type=int, default=60, help="因子IC回溯天数")
     args = parser.parse_args()
@@ -2411,21 +2484,31 @@ if __name__ == "__main__":
     logger = setup_logging(mode)
     logger.info(f"启动模式: {mode}")
 
+    # 心跳与失败告警：计划任务静默失败时可在下次运行/报告中感知
+    _write_heartbeat(mode, status="running")
+
     today = datetime.now().date()
     if not _is_trading_day(today):
         logger.info(f"今日({today})非A股交易日（周末或法定节假日），跳过运行")
         sys.exit(0)
 
-    config = load_config()
-    _validate_weights_consistency(config)
+    try:
+        config = load_config()
+        _validate_weights_consistency(config)
 
-    if args.factor_ic:
-        config.setdefault("factor_ic", {})["lookback_days"] = args.lookback
-        run_factor_ic(config)
-    elif args.intraday:
-        run_intraday(config)
-    elif args.afternoon:
-        run_afternoon(config)
-    else:
-        # 默认走盘前模式
-        run_premarket(config)
+        if args.factor_ic:
+            config.setdefault("factor_ic", {})["lookback_days"] = args.lookback
+            run_factor_ic(config)
+        elif args.intraday:
+            run_intraday(config)
+        elif args.afternoon:
+            run_afternoon(config)
+        else:
+            # 默认走盘前模式
+            run_premarket(config)
+        _write_heartbeat(mode, status="ok")
+    except SystemExit:
+        raise
+    except Exception as e:
+        _write_heartbeat(mode, status="failed", error=f"{type(e).__name__}: {e}")
+        raise
