@@ -1,4 +1,4 @@
-"""
+﻿"""
 综合评分器 - 24维度评分（含护城河moat+深度研究+板块联动+资金流向+机构调研+龙虎榜+龙头检测）
 
 维度清单见 get_sub_scores；config.yaml weights 必须与此处24维一一对应，
@@ -654,7 +654,7 @@ def apply_alpha_overlay(candidates: List[Dict], config: Dict) -> None:
     """
     cfg = config.get("alpha_overlay") or {}
     if not cfg.get("enabled", True):
-        return
+        return candidates
     weight = float(cfg.get("weight", 3.0))
     cap = float(cfg.get("cap", 6.0))
 
@@ -683,14 +683,50 @@ def apply_chip_guard(candidates: List[Dict], config: Dict) -> List[Dict]:
     if not cfg.get("enabled", True):
         return candidates
     threshold = float(cfg.get("z_threshold", 1.5))
+    # pos_250 一年位置排除(全市场IC h10=-0.112, t=-6.9 最强负因子):
+    # 实盘复用 ashare_specific.price_position_250d(0~1), 高位阈值默认0.9
+    pos_high = float(cfg.get("pos250_high", 0.9))
+
+    # bottom 排除(组合模拟实证2026-08): positive_v2 截面后20%平均跑输全池
+    # 30bp+/日——信号的真实预测力在空头端。候选池内按
+    # (quant_behavior+oversold_rebound)/2 排序剔除后20%。
+    # 注意: 候选池是全市场筛过的高分票, 其"后20%"不等于全市场底部,
+    # 但相对排序仍具参考意义
+    bottom_frac = float(cfg.get("bottom_exclude_frac", 0.0))  # 默认关闭,需显式启用
+
+    scored_for_bottom = []
+    for idx, c in enumerate(candidates):
+        zs = c.get("z_scores") or {}
+        composite = ((zs.get("quant_behavior", 0) or 0)
+                     + (zs.get("oversold_rebound", 0) or 0)) / 2.0
+        c["_bottom_sort"] = composite
+        candidates[idx] = c
+    if bottom_frac > 0 and len(candidates) >= 10:
+        cutoff_rank = int(len(candidates) * bottom_frac)
+        bottom_codes = {c["code"] for c in
+                        sorted(candidates, key=lambda x: x["_bottom_sort"])[:cutoff_rank]}
+    else:
+        bottom_codes = set()
+
     kept, excluded = [], []
     for c in candidates:
         zc = (c.get("z_scores") or {}).get("chip", 0) or 0
+        pp = (c.get("factors") or {}).get("price_position_250d")
+        if c.get("code") in bottom_codes:
+            c["guard_reason"] = "positive_v2 截面后列(风格失效保护)"
+            excluded.append(c)
+            continue
         if zc > threshold:
             c["guard_reason"] = f"获利盘压力(chip_z={zc:.2f}>{threshold})"
             excluded.append(c)
-        else:
-            kept.append(c)
+            continue
+        if pp is not None and float(pp) > pos_high:
+            c["guard_reason"] = f"一年高位(pos={float(pp):.2f}>{pos_high})"
+            excluded.append(c)
+            continue
+        kept.append(c)
+    for c in candidates:
+        c.pop("_bottom_sort", None)
     if excluded:
         logging.getLogger("stock_prediction").warning(
             "Chip guard 剔除 %d 只获利盘压力票(z>%.1f): %s",

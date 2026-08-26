@@ -421,6 +421,14 @@ details .news-full {{ font-size: 13px; color: var(--ink); margin-top: 6px; paddi
 
         # 推荐理由
         reason_html = self._build_reasons(stock)
+        # Alpha overlay 加成透明化: positive2 信号对最终分的调整量
+        ab = stock.get("alpha_boost")
+        if ab is not None and abs(ab) >= 0.5:
+            icon = "↑" if ab > 0 else "↓"
+            color = "#2e7d32" if ab > 0 else "#b3541e"
+            reason_html += (
+                f'<div style="margin-top:6px;font-size:12px;color:{color};">'
+                f'{icon} Alpha信号加成 {ab:+.1f} 分(量化异动+超跌反弹合成)</div>')
 
         # 操作建议
         dynamic_stop = factors.get("dynamic_stop_loss", 0)
