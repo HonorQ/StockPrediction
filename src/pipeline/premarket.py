@@ -593,6 +593,275 @@ def _pm_quick_topn(ctx):
     ctx['config'] = config
 
 
+def _calc_one_stock(ctx, idx, cand):
+    """单票深度因子计算(自 _pm_deep_loop 大循环机械提取)。
+
+    组件与上下文经 ctx 注入; 结果 append 到 scored_stocks。
+    """
+    (ashare_factors, atr_stop, capital_behavior_factor, chip_calc, circulate_factor, deep_research_factor, dragon_tiger, expectation_pricing, flow_cache, fundamental_factor, history_cache, holder_factor, hot_codes, hot_df, hot_money_tracker, institutional_factor, institutional_research, limit_quality_factor, lockup_factor, margin_factor, market_fetcher, market_history, money_factor, money_fetcher, money_flow_continuity, national_team_factor, news_event_analyzer, news_factor, news_list, next_day_predictor, oversold_strategy, phase2_start, policy_event_factor, popularity_factor, position_manager, profit_taking_detector, quant_detector, rebound_sustainability, relative_strength, rotation_data, scored_stocks, scorer, sector_leader, sector_linkage, sector_rotation, sentiment, sentiment_cycle, sentiment_factor, shareholder_factor, tech_cfg, top_candidates, trade_cfg) = ctx.unpack(
+        'ashare_factors', 'atr_stop', 'capital_behavior_factor', 'chip_calc'
+        'circulate_factor', 'deep_research_factor', 'dragon_tiger', 'expectation_pricing'
+        'flow_cache', 'fundamental_factor', 'history_cache', 'holder_factor'
+        'hot_codes', 'hot_df', 'hot_money_tracker', 'institutional_factor'
+        'institutional_research', 'limit_quality_factor', 'lockup_factor', 'margin_factor'
+        'market_fetcher', 'market_history', 'money_factor', 'money_fetcher'
+        'money_flow_continuity', 'national_team_factor', 'news_event_analyzer', 'news_factor'
+        'news_list', 'next_day_predictor', 'oversold_strategy', 'phase2_start'
+        'policy_event_factor', 'popularity_factor', 'position_manager', 'profit_taking_detector'
+        'quant_detector', 'rebound_sustainability', 'relative_strength', 'rotation_data'
+        'scored_stocks', 'scorer', 'sector_leader', 'sector_linkage'
+        'sector_rotation', 'sentiment', 'sentiment_cycle', 'sentiment_factor'
+        'shareholder_factor', 'tech_cfg', 'top_candidates', 'trade_cfg'
+    )
+
+    if (datetime.now() - phase2_start).total_seconds() > 480:
+        print(f"  ⏰ 阶段2已运行超过8分钟，停止计算（已处理{idx}/{len(top_candidates)}只）")
+        return "timeout"
+
+    stock_code = cand["code"]
+    stock_name = cand["name"]
+    current_price = cand["current_price"]
+    row = cand["row"]
+    print(f"    [{idx+1}/{len(top_candidates)}] {stock_name}({stock_code})...")
+    history = history_cache.get(stock_code)
+    if history is None:
+        history = market_fetcher.get_stock_history(stock_code, days=120)
+    if history.empty or len(history) < 20:
+        print("      ⚠️ 历史数据不足，跳过")
+        return "skip"
+
+    tech_factors = TechnicalFactors(history, tech_cfg)
+    all_factors = tech_factors.calculate_all()
+
+    flow_data = flow_cache.get(stock_code)
+    if flow_data is None:
+        flow_data = money_fetcher.get_stock_fund_flow(stock_code)
+    mf = money_factor.calculate_all(flow_data)
+    all_factors.update(mf)
+
+    stock_news_score = news_factor.score_stock_news(stock_code, news_list)
+    all_factors["news_score"] = stock_news_score
+
+    in_hot = stock_code in hot_codes
+    sf = sentiment_factor.calculate_all(sentiment, in_hot)
+    all_factors.update(sf)
+
+    strategies = StockStrategies.get_triggered_strategies(history)
+    all_factors["strategies_triggered"] = strategies
+    all_factors["strategy_count"] = len(strategies)
+
+    chip = chip_calc.calculate(history)
+    all_factors.update(chip)
+    all_factors["chip_score"] = chip_calc.get_chip_score(history)
+    # 补 chip_ 前缀映射，与 ml_selector._extract_features 期望的 key 名对齐
+    all_factors["chip_profit_ratio"] = chip.get("profit_ratio", 50)
+    all_factors["chip_concentration_70"] = chip.get("concentration_70", 50)
+    all_factors["chip_above_peak"] = chip.get("price_above_peak", 50)
+    all_factors["close_price"] = current_price
+
+    stock_data = row.to_dict()
+    ff = fundamental_factor.calculate_all(stock_data)
+    all_factors.update(ff)
+
+    popularity_data = {
+        "hot_rank": hot_df[hot_df["股票代码"].astype(str) == stock_code]["排名"].iloc[0] if not hot_df.empty and stock_code in hot_df.get("股票代码", pd.Series()).astype(str).values else 0,
+        "in_hot_list": stock_code in hot_codes,
+        "limit_up": sentiment.get("limit_up", 0),
+        "limit_down": sentiment.get("limit_down", 0),
+        "max_board": sentiment.get("max_board", 0),
+    }
+    pf = popularity_factor.calculate_all(popularity_data, stock_code)
+    all_factors.update(pf)
+
+    inf = institutional_factor.calculate_all(stock_code, stock_data)
+    all_factors.update(inf)
+
+    rs = relative_strength.calculate_all(history, market_df=market_history)
+    all_factors.update(rs)
+
+    rebound_result = oversold_strategy.check_oversold_rebound(history)
+    all_factors["oversold_rebound_detected"] = rebound_result["detected"]
+    all_factors["oversold_rebound_score"] = rebound_result["score"]
+    all_factors["oversold_rebound_signals"] = rebound_result["signals"]
+
+    all_factors["rotation_score"] = sector_rotation.get_rotation_score(rotation_data)
+    all_factors["tech_sector_strength"] = rotation_data.get("tech_strength", 50)
+    all_factors["rotation_signal"] = rotation_data.get("rotation_signal", "neutral")
+
+    sustainability = rebound_sustainability.analyze(history, rotation_data)
+    all_factors["sustainability_score"] = sustainability["sustainability_score"]
+    all_factors["rebound_type"] = sustainability["rebound_type"]
+    all_factors["next_day_bias"] = sustainability["next_day_bias"]
+    all_factors["sustainability_signals"] = sustainability["signals"]
+    all_factors["sustainability_risks"] = sustainability["risk_factors"]
+
+    next_day = next_day_predictor.predict(history, sustainability, rotation_data)
+    all_factors["next_day_prediction"] = next_day
+
+    expectation = expectation_pricing.analyze(history, news_list, stock_code)
+    all_factors["expectation_score"] = expectation["expectation_score"]
+    all_factors["expectation_overvalued"] = expectation["overvalued"]
+    all_factors["expectation_reasons"] = expectation["reasons"]
+
+    event_pricing = news_event_analyzer.analyze_event_pricing(news_list, stock_code, history)
+    all_factors["event_priced"] = event_pricing["event_priced"]
+    all_factors["event_pricing_degree"] = event_pricing["pricing_degree"]
+    all_factors["event_pricing_signals"] = event_pricing["signals"]
+
+    profit_taking = profit_taking_detector.detect(history, code=stock_code, name=stock_name)
+    all_factors["profit_taking_detected"] = profit_taking["detected"]
+    all_factors["profit_taking_intensity"] = profit_taking["intensity"]
+    all_factors["profit_taking_signals"] = profit_taking["signals"]
+
+    ashare = ashare_factors.calculate_all(history, sentiment, code=stock_code, name=stock_name)
+    all_factors.update(ashare)
+
+    hot_money = hot_money_tracker.analyze(history, code=stock_code, name=stock_name)
+    all_factors["hot_money_score"] = hot_money["hot_money_score"]
+    all_factors["hot_money_signals"] = hot_money["signals"]
+
+    sentiment_analysis = sentiment_cycle.analyze(sentiment)
+    all_factors["sentiment_cycle"] = sentiment_analysis
+
+    quant_result = quant_detector.detect_all(history, stock_data)
+    all_factors["quant_detected"] = quant_result["quant_detected"]
+    all_factors["quant_score"] = quant_result["quant_score"]
+    all_factors["quant_signals"] = quant_result["quant_signals"]
+    all_factors["quant_risk"] = quant_result["quant_risk"]
+
+    margin = margin_factor.calculate(stock_code)
+    all_factors["margin_trend"] = margin["margin_trend"]
+    all_factors["margin_score"] = margin.get("margin_score", 50)
+    all_factors["margin_signals"] = margin["margin_signals"]
+    shareholder = shareholder_factor.calculate(stock_code)
+    all_factors["shareholder_trend"] = shareholder["shareholder_trend"]
+    all_factors["shareholder_score"] = shareholder.get("shareholder_score", 50)
+    all_factors["shareholder_signals"] = shareholder["shareholder_signals"]
+    lockup = lockup_factor.calculate(stock_code)
+    all_factors["lockup_risk"] = lockup["lockup_risk"]
+    all_factors["lockup_score"] = lockup.get("lockup_score", 50)
+    all_factors["lockup_signals"] = lockup["lockup_signals"]
+    limit_quality = limit_quality_factor.calculate(history, code=stock_code, name=stock_name)
+    all_factors["limit_quality"] = limit_quality["limit_quality"]
+    all_factors["limit_signals"] = limit_quality["limit_signals"]
+
+    linkage = sector_linkage.analyze_sector_linkage(stock_code)
+    all_factors["sector_linkage_score"] = linkage["sector_linkage_score"]
+    all_factors["sector_signals"] = linkage["sector_signals"]
+    all_factors["hot_concepts"] = linkage["hot_concepts"]
+    all_factors["concept_count"] = linkage.get("concept_count", 0)
+
+    leader = sector_leader.detect_leader(history, stock_code)
+    all_factors["is_leader"] = leader["is_leader"]
+    all_factors["leader_score"] = leader["leader_score"]
+    all_factors["leader_signals"] = leader["leader_signals"]
+
+    flow_continuity = money_flow_continuity.analyze(stock_code)
+    all_factors["flow_continuity"] = flow_continuity["flow_continuity"]
+    all_factors["flow_continuity_score"] = flow_continuity["flow_continuity_score"]
+    all_factors["flow_continuity_signals"] = flow_continuity["flow_signals"]
+
+    research = institutional_research.analyze(stock_code)
+    all_factors["research_score"] = research["research_score"]
+    all_factors["research_signals"] = research["research_signals"]
+
+    lh = dragon_tiger.analyze(stock_code)
+    all_factors["lh_score"] = lh["lh_score"]
+    all_factors["lh_signals"] = lh["lh_signals"]
+    all_factors["hot_money_count"] = lh["hot_money_count"]
+    all_factors["institution_count"] = lh["institution_count"]
+    all_factors["institution_buy_net"] = lh["institution_buy_net"]
+
+    dr = deep_research_factor.analyze(history, news_list, stock_code, stock_data)
+    all_factors["deep_research_score"] = dr["deep_research_score"]
+    all_factors["deep_research_signals"] = dr["deep_research_signals"]
+    all_factors["volatility_regime"] = dr["volatility_regime"]
+    all_factors["position_at"] = dr["position_at"]
+    all_factors["catalyst_match_score"] = dr["catalyst_match_score"]
+    all_factors["big_move_count"] = dr["big_move_count"]
+    all_factors["prediction_confidence"] = dr["prediction_confidence"]
+    all_factors["historical_reference"] = dr["historical_reference"]
+    all_factors["risk_reference"] = dr["risk_reference"]
+
+    # 政策事件因子
+    policy_result = policy_event_factor.calculate(
+        stock_code=stock_code,
+        news_list=news_list,
+        stock_sector=stock_data.get("行业", ""),
+        stock_concepts=stock_data.get("concepts", []),
+        stock_name=stock_name,
+    )
+    all_factors["policy_score"] = policy_result["policy_score"]
+    all_factors["policy_direction"] = policy_result["policy_direction"]
+    all_factors["macro_impact"] = policy_result["macro_impact"]
+    all_factors["policy_events"] = policy_result["events"]
+    all_factors["policy_signals"] = policy_result["signals"]
+
+    # 资金行为模式因子
+    cap_behavior = capital_behavior_factor.calculate(history)
+    all_factors["capital_behavior"] = cap_behavior["capital_behavior"]
+    all_factors["capital_behavior_confidence"] = cap_behavior["capital_behavior_confidence"]
+    all_factors["capital_behavior_signals"] = cap_behavior["capital_behavior_signals"]
+    all_factors["flow_continuity"] = cap_behavior["flow_continuity"]
+
+    # 国家队因子
+    national_team = national_team_factor.calculate(
+        history=history,
+        stock_info=stock_data,
+        market_index=market_history,
+    )
+    all_factors["national_team_score"] = national_team["national_team_score"]
+    all_factors["national_team_holding"] = national_team["national_team_holding"]
+    all_factors["national_team_change"] = national_team["national_team_change"]
+    all_factors["national_team_signals"] = national_team["national_team_signals"]
+
+    try:
+        atr_series = atr_stop.calculate_atr(history)
+        current_atr = atr_series.iloc[-1] if not atr_series.empty else 0
+        if current_atr > 0 and current_price > 0:
+            stop_info = position_manager.calculate_stop_loss(current_price, current_atr, 50)
+            take_info = position_manager.calculate_take_profit(current_price, current_atr, 50)
+            pos_info = position_manager.calculate_position(50, trade_cfg.get("max_position_pct", 0.25), current_price)
+            all_factors["atr"] = round(current_atr, 3)
+            all_factors["dynamic_stop_loss"] = stop_info["stop_loss"]
+            all_factors["dynamic_stop_loss_pct"] = stop_info["stop_loss_pct"]
+            all_factors["dynamic_take_profit"] = take_info["take_profit"]
+            all_factors["dynamic_take_profit_pct"] = take_info["take_profit_pct"]
+            all_factors["position_pct"] = pos_info["position_pct"]
+            all_factors["position_shares"] = pos_info["shares"]
+    except Exception:
+        pass
+
+    # 股东人数/筹码集中度因子
+    holder = holder_factor.analyze(stock_code)
+    all_factors["holder_score"] = holder["holder_score"]
+    all_factors["holder_trend"] = holder["holder_trend"]
+    all_factors["holder_quarter_change_pct"] = holder["holder_quarter_change_pct"]
+
+    # 流通股东因子
+    circulate = circulate_factor.analyze(stock_code)
+    all_factors["circulate_score"] = circulate["circulate_score"]
+    all_factors["inst_holding_change"] = circulate["inst_holding_change"]
+    all_factors["northbound_change"] = circulate["northbound_change"]
+    all_factors["top10_holding_pct"] = circulate["top10_holding_pct"]
+
+    # 护城河/不可替代性因子（A层：复用 concept_count / leader / institutional / 市值）
+    all_factors.update(MoatFactors().calculate_all(all_factors))
+
+    sub_scores = scorer.get_sub_scores(all_factors)
+    expectation_penalty = scorer.penalty_expectation(all_factors)
+
+    scored_stocks.append({
+        "code": stock_code,
+        "name": stock_name,
+        "current_price": current_price,
+        "score": 50,  # placeholder, batch_normalize will overwrite
+        "sub_scores": sub_scores,
+        "expectation_penalty": expectation_penalty,
+        "factors": all_factors,
+        "strong_signals": 0,
+    })
+
 def _pm_deep_loop(ctx):
     """逐票深度因子计算 + 截面Z-Score归一化"""
     (
@@ -705,254 +974,10 @@ def _pm_deep_loop(ctx):
         market_history = None
 
     for idx, cand in enumerate(top_candidates):
-        # 超时保护：已运行超过8分钟就退出
-        if (datetime.now() - phase2_start).total_seconds() > 480:
-            print(f"  ⏰ 阶段2已运行超过8分钟，停止计算（已处理{idx}/{len(top_candidates)}只）")
+        result = _calc_one_stock(ctx, idx, cand)
+        if result == "timeout":
+            print(f"  ⏰ 阶段2已运行超过8分钟，停止计算（已处理{idx}只）")
             break
-
-        stock_code = cand["code"]
-        stock_name = cand["name"]
-        current_price = cand["current_price"]
-        row = cand["row"]
-        print(f"    [{idx+1}/{len(top_candidates)}] {stock_name}({stock_code})...")
-        history = history_cache.get(stock_code)
-        if history is None:
-            history = market_fetcher.get_stock_history(stock_code, days=120)
-        if history.empty or len(history) < 20:
-            print("      ⚠️ 历史数据不足，跳过")
-            continue
-
-        tech_factors = TechnicalFactors(history, tech_cfg)
-        all_factors = tech_factors.calculate_all()
-
-        flow_data = flow_cache.get(stock_code)
-        if flow_data is None:
-            flow_data = money_fetcher.get_stock_fund_flow(stock_code)
-        mf = money_factor.calculate_all(flow_data)
-        all_factors.update(mf)
-
-        stock_news_score = news_factor.score_stock_news(stock_code, news_list)
-        all_factors["news_score"] = stock_news_score
-
-        in_hot = stock_code in hot_codes
-        sf = sentiment_factor.calculate_all(sentiment, in_hot)
-        all_factors.update(sf)
-
-        strategies = StockStrategies.get_triggered_strategies(history)
-        all_factors["strategies_triggered"] = strategies
-        all_factors["strategy_count"] = len(strategies)
-
-        chip = chip_calc.calculate(history)
-        all_factors.update(chip)
-        all_factors["chip_score"] = chip_calc.get_chip_score(history)
-        # 补 chip_ 前缀映射，与 ml_selector._extract_features 期望的 key 名对齐
-        all_factors["chip_profit_ratio"] = chip.get("profit_ratio", 50)
-        all_factors["chip_concentration_70"] = chip.get("concentration_70", 50)
-        all_factors["chip_above_peak"] = chip.get("price_above_peak", 50)
-        all_factors["close_price"] = current_price
-
-        stock_data = row.to_dict()
-        ff = fundamental_factor.calculate_all(stock_data)
-        all_factors.update(ff)
-
-        popularity_data = {
-            "hot_rank": hot_df[hot_df["股票代码"].astype(str) == stock_code]["排名"].iloc[0] if not hot_df.empty and stock_code in hot_df.get("股票代码", pd.Series()).astype(str).values else 0,
-            "in_hot_list": stock_code in hot_codes,
-            "limit_up": sentiment.get("limit_up", 0),
-            "limit_down": sentiment.get("limit_down", 0),
-            "max_board": sentiment.get("max_board", 0),
-        }
-        pf = popularity_factor.calculate_all(popularity_data, stock_code)
-        all_factors.update(pf)
-
-        inf = institutional_factor.calculate_all(stock_code, stock_data)
-        all_factors.update(inf)
-
-        rs = relative_strength.calculate_all(history, market_df=market_history)
-        all_factors.update(rs)
-
-        rebound_result = oversold_strategy.check_oversold_rebound(history)
-        all_factors["oversold_rebound_detected"] = rebound_result["detected"]
-        all_factors["oversold_rebound_score"] = rebound_result["score"]
-        all_factors["oversold_rebound_signals"] = rebound_result["signals"]
-
-        all_factors["rotation_score"] = sector_rotation.get_rotation_score(rotation_data)
-        all_factors["tech_sector_strength"] = rotation_data.get("tech_strength", 50)
-        all_factors["rotation_signal"] = rotation_data.get("rotation_signal", "neutral")
-
-        sustainability = rebound_sustainability.analyze(history, rotation_data)
-        all_factors["sustainability_score"] = sustainability["sustainability_score"]
-        all_factors["rebound_type"] = sustainability["rebound_type"]
-        all_factors["next_day_bias"] = sustainability["next_day_bias"]
-        all_factors["sustainability_signals"] = sustainability["signals"]
-        all_factors["sustainability_risks"] = sustainability["risk_factors"]
-
-        next_day = next_day_predictor.predict(history, sustainability, rotation_data)
-        all_factors["next_day_prediction"] = next_day
-
-        expectation = expectation_pricing.analyze(history, news_list, stock_code)
-        all_factors["expectation_score"] = expectation["expectation_score"]
-        all_factors["expectation_overvalued"] = expectation["overvalued"]
-        all_factors["expectation_reasons"] = expectation["reasons"]
-
-        event_pricing = news_event_analyzer.analyze_event_pricing(news_list, stock_code, history)
-        all_factors["event_priced"] = event_pricing["event_priced"]
-        all_factors["event_pricing_degree"] = event_pricing["pricing_degree"]
-        all_factors["event_pricing_signals"] = event_pricing["signals"]
-
-        profit_taking = profit_taking_detector.detect(history, code=stock_code, name=stock_name)
-        all_factors["profit_taking_detected"] = profit_taking["detected"]
-        all_factors["profit_taking_intensity"] = profit_taking["intensity"]
-        all_factors["profit_taking_signals"] = profit_taking["signals"]
-
-        ashare = ashare_factors.calculate_all(history, sentiment, code=stock_code, name=stock_name)
-        all_factors.update(ashare)
-
-        hot_money = hot_money_tracker.analyze(history, code=stock_code, name=stock_name)
-        all_factors["hot_money_score"] = hot_money["hot_money_score"]
-        all_factors["hot_money_signals"] = hot_money["signals"]
-
-        sentiment_analysis = sentiment_cycle.analyze(sentiment)
-        all_factors["sentiment_cycle"] = sentiment_analysis
-
-        quant_result = quant_detector.detect_all(history, stock_data)
-        all_factors["quant_detected"] = quant_result["quant_detected"]
-        all_factors["quant_score"] = quant_result["quant_score"]
-        all_factors["quant_signals"] = quant_result["quant_signals"]
-        all_factors["quant_risk"] = quant_result["quant_risk"]
-
-        margin = margin_factor.calculate(stock_code)
-        all_factors["margin_trend"] = margin["margin_trend"]
-        all_factors["margin_score"] = margin.get("margin_score", 50)
-        all_factors["margin_signals"] = margin["margin_signals"]
-        shareholder = shareholder_factor.calculate(stock_code)
-        all_factors["shareholder_trend"] = shareholder["shareholder_trend"]
-        all_factors["shareholder_score"] = shareholder.get("shareholder_score", 50)
-        all_factors["shareholder_signals"] = shareholder["shareholder_signals"]
-        lockup = lockup_factor.calculate(stock_code)
-        all_factors["lockup_risk"] = lockup["lockup_risk"]
-        all_factors["lockup_score"] = lockup.get("lockup_score", 50)
-        all_factors["lockup_signals"] = lockup["lockup_signals"]
-        limit_quality = limit_quality_factor.calculate(history, code=stock_code, name=stock_name)
-        all_factors["limit_quality"] = limit_quality["limit_quality"]
-        all_factors["limit_signals"] = limit_quality["limit_signals"]
-
-        linkage = sector_linkage.analyze_sector_linkage(stock_code)
-        all_factors["sector_linkage_score"] = linkage["sector_linkage_score"]
-        all_factors["sector_signals"] = linkage["sector_signals"]
-        all_factors["hot_concepts"] = linkage["hot_concepts"]
-        all_factors["concept_count"] = linkage.get("concept_count", 0)
-
-        leader = sector_leader.detect_leader(history, stock_code)
-        all_factors["is_leader"] = leader["is_leader"]
-        all_factors["leader_score"] = leader["leader_score"]
-        all_factors["leader_signals"] = leader["leader_signals"]
-
-        flow_continuity = money_flow_continuity.analyze(stock_code)
-        all_factors["flow_continuity"] = flow_continuity["flow_continuity"]
-        all_factors["flow_continuity_score"] = flow_continuity["flow_continuity_score"]
-        all_factors["flow_continuity_signals"] = flow_continuity["flow_signals"]
-
-        research = institutional_research.analyze(stock_code)
-        all_factors["research_score"] = research["research_score"]
-        all_factors["research_signals"] = research["research_signals"]
-
-        lh = dragon_tiger.analyze(stock_code)
-        all_factors["lh_score"] = lh["lh_score"]
-        all_factors["lh_signals"] = lh["lh_signals"]
-        all_factors["hot_money_count"] = lh["hot_money_count"]
-        all_factors["institution_count"] = lh["institution_count"]
-        all_factors["institution_buy_net"] = lh["institution_buy_net"]
-
-        dr = deep_research_factor.analyze(history, news_list, stock_code, stock_data)
-        all_factors["deep_research_score"] = dr["deep_research_score"]
-        all_factors["deep_research_signals"] = dr["deep_research_signals"]
-        all_factors["volatility_regime"] = dr["volatility_regime"]
-        all_factors["position_at"] = dr["position_at"]
-        all_factors["catalyst_match_score"] = dr["catalyst_match_score"]
-        all_factors["big_move_count"] = dr["big_move_count"]
-        all_factors["prediction_confidence"] = dr["prediction_confidence"]
-        all_factors["historical_reference"] = dr["historical_reference"]
-        all_factors["risk_reference"] = dr["risk_reference"]
-
-        # 政策事件因子
-        policy_result = policy_event_factor.calculate(
-            stock_code=stock_code,
-            news_list=news_list,
-            stock_sector=stock_data.get("行业", ""),
-            stock_concepts=stock_data.get("concepts", []),
-            stock_name=stock_name,
-        )
-        all_factors["policy_score"] = policy_result["policy_score"]
-        all_factors["policy_direction"] = policy_result["policy_direction"]
-        all_factors["macro_impact"] = policy_result["macro_impact"]
-        all_factors["policy_events"] = policy_result["events"]
-        all_factors["policy_signals"] = policy_result["signals"]
-
-        # 资金行为模式因子
-        cap_behavior = capital_behavior_factor.calculate(history)
-        all_factors["capital_behavior"] = cap_behavior["capital_behavior"]
-        all_factors["capital_behavior_confidence"] = cap_behavior["capital_behavior_confidence"]
-        all_factors["capital_behavior_signals"] = cap_behavior["capital_behavior_signals"]
-        all_factors["flow_continuity"] = cap_behavior["flow_continuity"]
-
-        # 国家队因子
-        national_team = national_team_factor.calculate(
-            history=history,
-            stock_info=stock_data,
-            market_index=market_history,
-        )
-        all_factors["national_team_score"] = national_team["national_team_score"]
-        all_factors["national_team_holding"] = national_team["national_team_holding"]
-        all_factors["national_team_change"] = national_team["national_team_change"]
-        all_factors["national_team_signals"] = national_team["national_team_signals"]
-
-        try:
-            atr_series = atr_stop.calculate_atr(history)
-            current_atr = atr_series.iloc[-1] if not atr_series.empty else 0
-            if current_atr > 0 and current_price > 0:
-                stop_info = position_manager.calculate_stop_loss(current_price, current_atr, 50)
-                take_info = position_manager.calculate_take_profit(current_price, current_atr, 50)
-                pos_info = position_manager.calculate_position(50, trade_cfg.get("max_position_pct", 0.25), current_price)
-                all_factors["atr"] = round(current_atr, 3)
-                all_factors["dynamic_stop_loss"] = stop_info["stop_loss"]
-                all_factors["dynamic_stop_loss_pct"] = stop_info["stop_loss_pct"]
-                all_factors["dynamic_take_profit"] = take_info["take_profit"]
-                all_factors["dynamic_take_profit_pct"] = take_info["take_profit_pct"]
-                all_factors["position_pct"] = pos_info["position_pct"]
-                all_factors["position_shares"] = pos_info["shares"]
-        except Exception:
-            pass
-
-        # 股东人数/筹码集中度因子
-        holder = holder_factor.analyze(stock_code)
-        all_factors["holder_score"] = holder["holder_score"]
-        all_factors["holder_trend"] = holder["holder_trend"]
-        all_factors["holder_quarter_change_pct"] = holder["holder_quarter_change_pct"]
-
-        # 流通股东因子
-        circulate = circulate_factor.analyze(stock_code)
-        all_factors["circulate_score"] = circulate["circulate_score"]
-        all_factors["inst_holding_change"] = circulate["inst_holding_change"]
-        all_factors["northbound_change"] = circulate["northbound_change"]
-        all_factors["top10_holding_pct"] = circulate["top10_holding_pct"]
-
-        # 护城河/不可替代性因子（A层：复用 concept_count / leader / institutional / 市值）
-        all_factors.update(MoatFactors().calculate_all(all_factors))
-
-        sub_scores = scorer.get_sub_scores(all_factors)
-        expectation_penalty = scorer.penalty_expectation(all_factors)
-
-        scored_stocks.append({
-            "code": stock_code,
-            "name": stock_name,
-            "current_price": current_price,
-            "score": 50,  # placeholder, batch_normalize will overwrite
-            "sub_scores": sub_scores,
-            "expectation_penalty": expectation_penalty,
-            "factors": all_factors,
-            "strong_signals": 0,
-        })
 
     print(f"  共计算 {len(scored_stocks)} 只股票的因子")
     _pack(ctx, dict(locals()))
@@ -1047,7 +1072,8 @@ def _pm_guard(ctx):
     ctx["config"] = config
 
 
-def _pm_persist(ctx):
+def _pm_persist_stage1(ctx):
+    """阶段4之1"""
     (
         SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
         atr_raw, atr_series, atr_value, bp_count, bp_engine,
@@ -1079,6 +1105,104 @@ def _pm_persist(ctx):
     )
     config = ctx["config"]
 
+    (
+        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
+        atr_raw, atr_series, atr_value, bp_count, bp_engine,
+        cache_data, cap, check_date, code, db,
+        db_field, entry, entry_price, exit_price, f,
+        filtered, final, global_markets, health_note, hist,
+        history, i, ind, index_data, industry_map,
+        lookback, market_fetcher, max_per_ind, max_rec, nd,
+        news_analysis, news_factor, news_list, param_field, past,
+        past_recs, pos_info, pos_mgr, rec, rec_configs,
+        recommendations, report_content, report_path, reporter, ret,
+        rotation_data, s, score, scored_stocks, screener,
+        sec, sector_count, sentiment, sl_info, today,
+        tp_info, trade_cfg,
+    ) = ctx.unpack(
+        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
+        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
+        'cache_data', 'cap', 'check_date', 'code', 'db',
+        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
+        'filtered', 'final', 'global_markets', 'health_note', 'hist',
+        'history', 'i', 'ind', 'index_data', 'industry_map',
+        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
+        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
+        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
+        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
+        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
+        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
+        'tp_info', 'trade_cfg',
+    )
+    config = ctx["config"]
+    _pack(ctx, dict(locals()))
+    ctx['config'] = config
+
+def _pm_p2s1(ctx):
+    """阶段2之1"""
+    """阶段4之2"""
+    (
+        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
+        atr_raw, atr_series, atr_value, bp_count, bp_engine,
+        cache_data, cap, check_date, code, db,
+        db_field, entry, entry_price, exit_price, f,
+        filtered, final, global_markets, health_note, hist,
+        history, i, ind, index_data, industry_map,
+        lookback, market_fetcher, max_per_ind, max_rec, nd,
+        news_analysis, news_factor, news_list, param_field, past,
+        past_recs, pos_info, pos_mgr, rec, rec_configs,
+        recommendations, report_content, report_path, reporter, ret,
+        rotation_data, s, score, scored_stocks, screener,
+        sec, sector_count, sentiment, sl_info, today,
+        tp_info, trade_cfg,
+    ) = ctx.unpack(
+        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
+        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
+        'cache_data', 'cap', 'check_date', 'code', 'db',
+        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
+        'filtered', 'final', 'global_markets', 'health_note', 'hist',
+        'history', 'i', 'ind', 'index_data', 'industry_map',
+        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
+        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
+        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
+        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
+        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
+        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
+        'tp_info', 'trade_cfg',
+    )
+    config = ctx["config"]
+
+    """阶段4之2"""
+    (
+        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
+        atr_raw, atr_series, atr_value, bp_count, bp_engine,
+        cache_data, cap, check_date, code, db,
+        db_field, entry, entry_price, exit_price, f,
+        filtered, final, global_markets, health_note, hist,
+        history, i, ind, index_data, industry_map,
+        lookback, market_fetcher, max_per_ind, max_rec, nd,
+        news_analysis, news_factor, news_list, param_field, past,
+        past_recs, pos_info, pos_mgr, rec, rec_configs,
+        recommendations, report_content, report_path, reporter, ret,
+        rotation_data, s, score, scored_stocks, screener,
+        sec, sector_count, sentiment, sl_info, today,
+        tp_info, trade_cfg,
+    ) = ctx.unpack(
+        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
+        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
+        'cache_data', 'cap', 'check_date', 'code', 'db',
+        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
+        'filtered', 'final', 'global_markets', 'health_note', 'hist',
+        'history', 'i', 'ind', 'index_data', 'industry_map',
+        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
+        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
+        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
+        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
+        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
+        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
+        'tp_info', 'trade_cfg',
+    )
+    config = ctx["config"]
     try:
         industry_map = market_fetcher.get_industry_map()
         if industry_map:
@@ -1149,8 +1273,43 @@ def _pm_persist(ctx):
                 logger.warning("业务画像生成失败(不影响主流程): %s", e)
     except Exception as e:
         logger.warning("行业分散约束失败，沿用原排序: %s", e)
+    _pack(ctx, dict(locals()))
+    ctx['config'] = config
 
-    # === 缓存候选池（去掉大字段，仅存关键数据供盘中用）===
+def _pm_p2s2(ctx):
+    """阶段2之2"""
+    """阶段4之2"""
+    (
+        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
+        atr_raw, atr_series, atr_value, bp_count, bp_engine,
+        cache_data, cap, check_date, code, db,
+        db_field, entry, entry_price, exit_price, f,
+        filtered, final, global_markets, health_note, hist,
+        history, i, ind, index_data, industry_map,
+        lookback, market_fetcher, max_per_ind, max_rec, nd,
+        news_analysis, news_factor, news_list, param_field, past,
+        past_recs, pos_info, pos_mgr, rec, rec_configs,
+        recommendations, report_content, report_path, reporter, ret,
+        rotation_data, s, score, scored_stocks, screener,
+        sec, sector_count, sentiment, sl_info, today,
+        tp_info, trade_cfg,
+    ) = ctx.unpack(
+        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
+        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
+        'cache_data', 'cap', 'check_date', 'code', 'db',
+        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
+        'filtered', 'final', 'global_markets', 'health_note', 'hist',
+        'history', 'i', 'ind', 'index_data', 'industry_map',
+        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
+        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
+        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
+        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
+        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
+        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
+        'tp_info', 'trade_cfg',
+    )
+    config = ctx["config"]
+
     today = datetime.now().strftime("%Y-%m-%d")
     cache_data = {
         "date": today,
@@ -1200,15 +1359,87 @@ def _pm_persist(ctx):
         })
     save_cache(f"premarket_{today}.json", cache_data)
     print(f"\n  ✅ 候选池已缓存 → cache/premarket_{today}.json ({len(cache_data['candidates'])}只)")
+    _pack(ctx, dict(locals()))
+    ctx['config'] = config
+    _pack(ctx, dict(locals()))
+    ctx['config'] = config
 
-    # 保存到数据库
+
+def _pm_persist_stage2(ctx):
+    """编排器(原实现按段切分, 状态经ctx传递)。"""
+    _pm_p2s1(ctx)
+    _pm_p2s2(ctx)
+
+def _pm_p3s1(ctx):
+    """阶段2之1"""
+    """阶段4之3"""
+    (
+        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
+        atr_raw, atr_series, atr_value, bp_count, bp_engine,
+        cache_data, cap, check_date, code, db,
+        db_field, entry, entry_price, exit_price, f,
+        filtered, final, global_markets, health_note, hist,
+        history, i, ind, index_data, industry_map,
+        lookback, market_fetcher, max_per_ind, max_rec, nd,
+        news_analysis, news_factor, news_list, param_field, past,
+        past_recs, pos_info, pos_mgr, rec, rec_configs,
+        recommendations, report_content, report_path, reporter, ret,
+        rotation_data, s, score, scored_stocks, screener,
+        sec, sector_count, sentiment, sl_info, today,
+        tp_info, trade_cfg,
+    ) = ctx.unpack(
+        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
+        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
+        'cache_data', 'cap', 'check_date', 'code', 'db',
+        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
+        'filtered', 'final', 'global_markets', 'health_note', 'hist',
+        'history', 'i', 'ind', 'index_data', 'industry_map',
+        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
+        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
+        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
+        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
+        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
+        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
+        'tp_info', 'trade_cfg',
+    )
+    config = ctx["config"]
+
+    """阶段4之3"""
+    (
+        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
+        atr_raw, atr_series, atr_value, bp_count, bp_engine,
+        cache_data, cap, check_date, code, db,
+        db_field, entry, entry_price, exit_price, f,
+        filtered, final, global_markets, health_note, hist,
+        history, i, ind, index_data, industry_map,
+        lookback, market_fetcher, max_per_ind, max_rec, nd,
+        news_analysis, news_factor, news_list, param_field, past,
+        past_recs, pos_info, pos_mgr, rec, rec_configs,
+        recommendations, report_content, report_path, reporter, ret,
+        rotation_data, s, score, scored_stocks, screener,
+        sec, sector_count, sentiment, sl_info, today,
+        tp_info, trade_cfg,
+    ) = ctx.unpack(
+        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
+        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
+        'cache_data', 'cap', 'check_date', 'code', 'db',
+        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
+        'filtered', 'final', 'global_markets', 'health_note', 'hist',
+        'history', 'i', 'ind', 'index_data', 'industry_map',
+        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
+        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
+        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
+        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
+        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
+        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
+        'tp_info', 'trade_cfg',
+    )
+    config = ctx["config"]
     db = StockDatabase()
-    # 先扫描 paper_trades 未平仓仓位，根据当日收盘价检查止损/止盈/到期
     try:
         _update_open_paper_trades(db, market_fetcher, trade_cfg, today)
     except Exception as _e:
         print(f"  ⚠️ paper_trades 维护失败: {_e}")
-    # 预先计算推荐股票的 ATR 和仓位
     if recommendations:
         atr_calc = ATRStopLoss()
         pos_mgr = PositionManager(max_stop_loss_pct=trade_cfg.get("max_stop_loss_pct", -0.08))
@@ -1248,6 +1479,42 @@ def _pm_persist(ctx):
                 "hold_days": trade_cfg.get("hold_days", 3),
                 "shares": pos_info["shares"],
             }
+    _pack(ctx, dict(locals()))
+    ctx['config'] = config
+
+def _pm_p3s2(ctx):
+    """阶段2之2"""
+    """阶段4之3"""
+    (
+        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
+        atr_raw, atr_series, atr_value, bp_count, bp_engine,
+        cache_data, cap, check_date, code, db,
+        db_field, entry, entry_price, exit_price, f,
+        filtered, final, global_markets, health_note, hist,
+        history, i, ind, index_data, industry_map,
+        lookback, market_fetcher, max_per_ind, max_rec, nd,
+        news_analysis, news_factor, news_list, param_field, past,
+        past_recs, pos_info, pos_mgr, rec, rec_configs,
+        recommendations, report_content, report_path, reporter, ret,
+        rotation_data, s, score, scored_stocks, screener,
+        sec, sector_count, sentiment, sl_info, today,
+        tp_info, trade_cfg,
+    ) = ctx.unpack(
+        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
+        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
+        'cache_data', 'cap', 'check_date', 'code', 'db',
+        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
+        'filtered', 'final', 'global_markets', 'health_note', 'hist',
+        'history', 'i', 'ind', 'index_data', 'industry_map',
+        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
+        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
+        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
+        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
+        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
+        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
+        'tp_info', 'trade_cfg',
+    )
+    config = ctx["config"]
 
     for i, rec in enumerate(recommendations, 1):
         db.save_recommendation(
@@ -1280,7 +1547,6 @@ def _pm_persist(ctx):
             )
         except Exception as e:
             logger.warning("开仓失败 %s: %s", code, e)
-    # 保存所有候选的因子截面（用于IC计算）
     for s in scored_stocks:
         db.save_factor_snapshot(
             trade_date=today,
@@ -1290,8 +1556,6 @@ def _pm_persist(ctx):
             sub_scores=s.get("sub_scores", {}),
             factors=s.get("factors", {}),
         )
-
-    # 更新历史推荐的表现（用T+N日的实际收盘价计算收益，避免未来函数）
     try:
         for lookback, db_field, param_field in [(1, "d1_return", "d1"), (3, "d3_return", "d3"),
                                                 (5, "d5_return", "d5"), (10, "d10_return", "d10"),
@@ -1317,10 +1581,51 @@ def _pm_persist(ctx):
                     )
     except Exception as e:
         logger.warning("更新历史表现失败: %s", e)
+    _pack(ctx, dict(locals()))
+    ctx['config'] = config
+    _pack(ctx, dict(locals()))
+    ctx['config'] = config
 
-    # 生成盘前报告
+
+def _pm_persist_stage3(ctx):
+    """编排器(原实现按段切分, 状态经ctx传递)。"""
+    _pm_p3s1(ctx)
+    _pm_p3s2(ctx)
+
+def _pm_persist_stage4(ctx):
+    """阶段4之4"""
+    (
+        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
+        atr_raw, atr_series, atr_value, bp_count, bp_engine,
+        cache_data, cap, check_date, code, db,
+        db_field, entry, entry_price, exit_price, f,
+        filtered, final, global_markets, health_note, hist,
+        history, i, ind, index_data, industry_map,
+        lookback, market_fetcher, max_per_ind, max_rec, nd,
+        news_analysis, news_factor, news_list, param_field, past,
+        past_recs, pos_info, pos_mgr, rec, rec_configs,
+        recommendations, report_content, report_path, reporter, ret,
+        rotation_data, s, score, scored_stocks, screener,
+        sec, sector_count, sentiment, sl_info, today,
+        tp_info, trade_cfg,
+    ) = ctx.unpack(
+        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
+        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
+        'cache_data', 'cap', 'check_date', 'code', 'db',
+        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
+        'filtered', 'final', 'global_markets', 'health_note', 'hist',
+        'history', 'i', 'ind', 'index_data', 'industry_map',
+        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
+        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
+        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
+        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
+        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
+        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
+        'tp_info', 'trade_cfg',
+    )
+    config = ctx["config"]
+
     reporter = ReportGenerator()
-    # 回顾表排除回测行(与午后模式同口径，每日一条最终推荐)
     history = db.get_recent_recommendations(
         days=14, modes=("afternoon", "premarket", "feedback_training"))
     report_content = reporter.generate_report(
@@ -1339,6 +1644,16 @@ def _pm_persist(ctx):
     print(f"  ✅ 盘前报告已生成: {report_path}")
     _pack(ctx, dict(locals()))
     ctx["config"] = config
+    _pack(ctx, dict(locals()))
+    ctx['config'] = config
+
+
+def _pm_persist(ctx):
+    """编排器(原实现按段切分, 状态经ctx传递)。"""
+    _pm_persist_stage1(ctx)
+    _pm_persist_stage2(ctx)
+    _pm_persist_stage3(ctx)
+    _pm_persist_stage4(ctx)
 
 
 def _pm_feedback(ctx):
