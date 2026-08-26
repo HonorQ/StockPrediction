@@ -6,8 +6,7 @@ logger = get_logger()
 
 import numpy as np
 import pandas as pd
-import time
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from src.utils.helpers import get_limit_pct
 
@@ -47,7 +46,6 @@ class HotStocksFetcher:
     # ------------------------------------------------------------------
     def get_hot_rank(self) -> pd.DataFrame:
         """获取人气榜 — 按成交额降序模拟（替代东财人气榜API）"""
-        import numpy as np
         try:
             df = self._get_market_data()
             if df.empty:
@@ -134,7 +132,7 @@ class HotStocksFetcher:
 
     def get_broken_limit_pool(self) -> pd.DataFrame:
         """炸板池 — 新浪无逐笔数据，返回空"""
-        logger.info(f'  ℹ️ 炸板池: 新浪源无逐笔数据，跳过')
+        logger.info('  ℹ️ 炸板池: 新浪源无逐笔数据，跳过')
         return pd.DataFrame()
 
     # ------------------------------------------------------------------

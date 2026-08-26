@@ -8,7 +8,6 @@ logger = get_logger()
 import requests
 import hashlib
 import re
-import time
 from typing import List, Dict
 from datetime import datetime
 
@@ -47,7 +46,7 @@ class NewsFetcher:
 
             # 检查签名错误
             if data.get("errno") == "10012":
-                logger.info(f'  ⚠️ 财联社签名已变更，尝试akshare备选...')
+                logger.info('  ⚠️ 财联社签名已变更，尝试akshare备选...')
                 return self._get_cls_via_akshare(limit)
 
             news_list = []

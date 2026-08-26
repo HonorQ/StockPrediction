@@ -9,7 +9,7 @@ import akshare as ak
 import pandas as pd
 import threading
 import time
-from typing import Dict, List
+from typing import Dict
 
 
 class MoneyFlowFetcher:

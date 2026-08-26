@@ -4,7 +4,6 @@ A股 + 外盘行情数据获取
 """
 import akshare as ak
 import pandas as pd
-import numpy as np
 import requests
 import re
 import os
