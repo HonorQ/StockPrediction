@@ -17,6 +17,14 @@ from src.utils.log import get_logger
 
 logger = get_logger()
 
+def _pack(ctx, local_vars):
+    """阶段结束时把局部状态写回 ctx(排除私有/参数名)。"""
+    for k, v in local_vars.items():
+        if not k.startswith('_') and k not in ('ctx', 'config'):
+            ctx[k] = v
+
+
+
 from src.utils.heartbeat import check_task_alerts
 from src.factors.moat import MoatFactors
 from src.engine.entry_risk_filter import _filter_high_risk_entries
@@ -63,7 +71,36 @@ from src.pipeline.common import (  # noqa: F401
 )
 
 
-def run_premarket(config):
+def _pm_init(ctx):
+    (
+        _alerts, _t0, a, ashare_factors, atr_stop,
+        capital_behavior_factor, chip_calc, circulate_factor, db, deep_research_factor,
+        dragon_tiger, expectation_pricing, filter_cfg, fundamental_factor, global_market_cfg,
+        health_note, holder_factor, hot_fetcher, hot_money_tracker, institutional_factor,
+        institutional_research, k, keywords_cfg, latest, limit_quality_factor,
+        lockup_factor, macro_detector, margin_factor, market_fetcher, money_factor,
+        money_fetcher, money_flow_continuity, national_team_factor, news_event_analyzer, news_factor,
+        news_fetcher, next_day_predictor, oversold_strategy, policy_event_factor, popularity_factor,
+        position_manager, profit_taking_detector, quant_detector, rebound_sustainability, relative_strength,
+        scorer, screener, sector_leader, sector_linkage, sector_rotation,
+        sentiment_cycle, sentiment_factor, shareholder_factor, tech_cfg, trade_cfg,
+        v, weights,
+    ) = ctx.unpack(
+        '_alerts', '_t0', 'a', 'ashare_factors', 'atr_stop',
+        'capital_behavior_factor', 'chip_calc', 'circulate_factor', 'db', 'deep_research_factor',
+        'dragon_tiger', 'expectation_pricing', 'filter_cfg', 'fundamental_factor', 'global_market_cfg',
+        'health_note', 'holder_factor', 'hot_fetcher', 'hot_money_tracker', 'institutional_factor',
+        'institutional_research', 'k', 'keywords_cfg', 'latest', 'limit_quality_factor',
+        'lockup_factor', 'macro_detector', 'margin_factor', 'market_fetcher', 'money_factor',
+        'money_fetcher', 'money_flow_continuity', 'national_team_factor', 'news_event_analyzer', 'news_factor',
+        'news_fetcher', 'next_day_predictor', 'oversold_strategy', 'policy_event_factor', 'popularity_factor',
+        'position_manager', 'profit_taking_detector', 'quant_detector', 'rebound_sustainability', 'relative_strength',
+        'scorer', 'screener', 'sector_leader', 'sector_linkage', 'sector_rotation',
+        'sentiment_cycle', 'sentiment_factor', 'shareholder_factor', 'tech_cfg', 'trade_cfg',
+        'v', 'weights',
+    )
+    config = ctx["config"]
+
     print("=" * 60)
     print("  盘前模式 — 全量因子计算")
     print(f"  运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -146,8 +183,28 @@ def run_premarket(config):
     except Exception as e:
         print(f"  [权重合并] 跳过: {e}")
     scorer = StockScorer(weights)
+    _pack(ctx, dict(locals()))
+    ctx["config"] = config
 
-    # 1. 获取实时行情
+
+def _pm_mkt(ctx):
+    (
+        a_stock_df, change, change_col, chg_60, code,
+        code_col, col_60, concept_map, concept_negative, concept_neutral,
+        concept_positive, concept_result, event, filtered_positive, global_market_cfg,
+        global_markets, hot_fetcher, icon, index_data, macro_detector,
+        macro_events, market_fetcher, news_analysis, news_factor, news_fetcher,
+        news_list, overbought_count, row, turnover, turnover_col,
+    ) = ctx.unpack(
+        'a_stock_df', 'change', 'change_col', 'chg_60', 'code',
+        'code_col', 'col_60', 'concept_map', 'concept_negative', 'concept_neutral',
+        'concept_positive', 'concept_result', 'event', 'filtered_positive', 'global_market_cfg',
+        'global_markets', 'hot_fetcher', 'icon', 'index_data', 'macro_detector',
+        'macro_events', 'market_fetcher', 'news_analysis', 'news_factor', 'news_fetcher',
+        'news_list', 'overbought_count', 'row', 'turnover', 'turnover_col',
+    )
+    config = ctx["config"]
+
     print("\n[1/6] 获取A股实时行情...")
     a_stock_df = market_fetcher.get_a_share_realtime()
     if a_stock_df.empty:
@@ -232,8 +289,26 @@ def run_premarket(config):
         print(f"  📉 利空匹配 {len(concept_negative)} 只 → 不加入（可能需回避）")
     if concept_neutral:
         print(f"  📊 中性匹配 {len(concept_neutral)} 只 → 不处理")
+    _pack(ctx, dict(locals()))
+    ctx["config"] = config
 
-    # 5. 热点+情绪
+
+def _pm_sent(ctx):
+    (
+        _regime_info, concept_positive, global_markets, hot_codes, hot_df,
+        hot_fetcher, index_data, k, market_fetcher, news_list,
+        northbound_data, r, regime, regime_filter, regime_result,
+        regime_weights, rotation_data, scorer, sector_rotation, sentiment,
+        si_cfg, switched, v, weights,
+    ) = ctx.unpack(
+        '_regime_info', 'concept_positive', 'global_markets', 'hot_codes', 'hot_df',
+        'hot_fetcher', 'index_data', 'k', 'market_fetcher', 'news_list',
+        'northbound_data', 'r', 'regime', 'regime_filter', 'regime_result',
+        'regime_weights', 'rotation_data', 'scorer', 'sector_rotation', 'sentiment',
+        'si_cfg', 'switched', 'v', 'weights',
+    )
+    config = ctx["config"]
+
     print("\n[5/6] 获取热点和市场情绪...")
     hot_df = hot_fetcher.get_hot_rank()
     hot_codes = set(concept_positive)
@@ -301,8 +376,74 @@ def run_premarket(config):
                   f"维度: {', '.join(scorer.NEGATIVE_IC_DIMS)})")
     except Exception as e:
         logger.warning("信号反转配置失败(不影响主流程): %s", e)
+    _pack(ctx, dict(locals()))
+    ctx["config"] = config
 
-    # 6. 筛选 + 深度计算
+
+def _pm_deep(ctx):
+    (
+        QS_CHANGE_CAP, QS_CHANGE_W, QS_HOT, QS_MV_SWEET, QS_NEWS_CAP,
+        QS_TURNOVER2, QS_TURNOVER5, QS_VOLUME_RATIO, _, a_stock_df,
+        all_factors, ashare, ashare_factors, atr_series, atr_stop,
+        before, c, cand, candidates_df, cap_behavior,
+        capital_behavior_factor, change_pct, chip, chip_calc, circulate,
+        circulate_factor, code_k, current_atr, current_price, db,
+        deep_research_factor, dr, dragon_tiger, elapsed_prefetch, event_pricing,
+        exclude_boards, expectation, expectation_penalty, expectation_pricing, ff,
+        filter_cfg, flow_cache, flow_continuity, flow_data, fundamental_factor,
+        h_k, history, history_cache, holder, holder_factor,
+        hot_codes, hot_df, hot_money, hot_money_tracker, idx,
+        in_hot, inf, institutional_factor, institutional_research, leader,
+        lh, limit_quality, limit_quality_factor, linkage, lockup,
+        lockup_factor, margin, margin_factor, market_fetcher, market_history,
+        mf, money_factor, money_fetcher, money_flow_continuity, mv_yi,
+        n, national_team, national_team_factor, news_event_analyzer, news_factor,
+        news_list, next_day, next_day_predictor, ns, ok_count,
+        oversold_strategy, pf, phase2_start, policy_event_factor, policy_result,
+        popularity_data, popularity_factor, pos_info, position_manager, prefetch_codes,
+        prefetch_start, profit_taking, profit_taking_detector, qs, qs_cfg,
+        quant_detector, quant_result, quick_scored, rebound_result, rebound_sustainability,
+        regime, relative_strength, research, rotation_data, row,
+        rs, saved_rows, saved_stocks, scored_stocks, scorer,
+        screener, sector_leader, sector_linkage, sector_rotation, sentiment,
+        sentiment_analysis, sentiment_cycle, sentiment_factor, sf, shareholder,
+        shareholder_factor, stock_cfg, stock_code, stock_data, stock_name,
+        stock_news_score, stop_info, strategies, sub_scores, sustainability,
+        take_info, tech_cfg, tech_factors, top_candidates, top_n,
+        total_mv, trade_cfg, turnover, v, volume_ratio,
+    ) = ctx.unpack(
+        'QS_CHANGE_CAP', 'QS_CHANGE_W', 'QS_HOT', 'QS_MV_SWEET', 'QS_NEWS_CAP',
+        'QS_TURNOVER2', 'QS_TURNOVER5', 'QS_VOLUME_RATIO', '_', 'a_stock_df',
+        'all_factors', 'ashare', 'ashare_factors', 'atr_series', 'atr_stop',
+        'before', 'c', 'cand', 'candidates_df', 'cap_behavior',
+        'capital_behavior_factor', 'change_pct', 'chip', 'chip_calc', 'circulate',
+        'circulate_factor', 'code_k', 'current_atr', 'current_price', 'db',
+        'deep_research_factor', 'dr', 'dragon_tiger', 'elapsed_prefetch', 'event_pricing',
+        'exclude_boards', 'expectation', 'expectation_penalty', 'expectation_pricing', 'ff',
+        'filter_cfg', 'flow_cache', 'flow_continuity', 'flow_data', 'fundamental_factor',
+        'h_k', 'history', 'history_cache', 'holder', 'holder_factor',
+        'hot_codes', 'hot_df', 'hot_money', 'hot_money_tracker', 'idx',
+        'in_hot', 'inf', 'institutional_factor', 'institutional_research', 'leader',
+        'lh', 'limit_quality', 'limit_quality_factor', 'linkage', 'lockup',
+        'lockup_factor', 'margin', 'margin_factor', 'market_fetcher', 'market_history',
+        'mf', 'money_factor', 'money_fetcher', 'money_flow_continuity', 'mv_yi',
+        'n', 'national_team', 'national_team_factor', 'news_event_analyzer', 'news_factor',
+        'news_list', 'next_day', 'next_day_predictor', 'ns', 'ok_count',
+        'oversold_strategy', 'pf', 'phase2_start', 'policy_event_factor', 'policy_result',
+        'popularity_data', 'popularity_factor', 'pos_info', 'position_manager', 'prefetch_codes',
+        'prefetch_start', 'profit_taking', 'profit_taking_detector', 'qs', 'qs_cfg',
+        'quant_detector', 'quant_result', 'quick_scored', 'rebound_result', 'rebound_sustainability',
+        'regime', 'relative_strength', 'research', 'rotation_data', 'row',
+        'rs', 'saved_rows', 'saved_stocks', 'scored_stocks', 'scorer',
+        'screener', 'sector_leader', 'sector_linkage', 'sector_rotation', 'sentiment',
+        'sentiment_analysis', 'sentiment_cycle', 'sentiment_factor', 'sf', 'shareholder',
+        'shareholder_factor', 'stock_cfg', 'stock_code', 'stock_data', 'stock_name',
+        'stock_news_score', 'stop_info', 'strategies', 'sub_scores', 'sustainability',
+        'take_info', 'tech_cfg', 'tech_factors', 'top_candidates', 'top_n',
+        'total_mv', 'trade_cfg', 'turnover', 'v', 'volume_ratio',
+    )
+    config = ctx["config"]
+
     print("\n[6/6] 筛选股票并计算因子...")
     print("  --- 第一层: 硬性条件筛选 ---")
     candidates_df = screener.filter_hard_conditions(a_stock_df)
@@ -675,8 +816,24 @@ def run_premarket(config):
         })
 
     print(f"  共计算 {len(scored_stocks)} 只股票的因子")
+    _pack(ctx, dict(locals()))
+    ctx["config"] = config
 
-    # 截面Z-Score归一化
+
+def _pm_guard(ctx):
+    (
+        _health_today, before_health, db, dynamic_pairs, filter_cfg,
+        final, final_max_rec, health, health_note, max_rec,
+        qualified, recommendations, regime, regime_filter, regime_max,
+        regime_result, scored_stocks, screener, warn_txt, weights,
+    ) = ctx.unpack(
+        '_health_today', 'before_health', 'db', 'dynamic_pairs', 'filter_cfg',
+        'final', 'final_max_rec', 'health', 'health_note', 'max_rec',
+        'qualified', 'recommendations', 'regime', 'regime_filter', 'regime_max',
+        'regime_result', 'scored_stocks', 'screener', 'warn_txt', 'weights',
+    )
+    config = ctx["config"]
+
     print("  --- 截面Z-Score归一化(替代固定50分基线) ---")
     # 动态正交化对由 feedback_loop IC 分析持久化，跨进程生效
     from src.engine.feedback_loop import FeedbackLoop
@@ -743,8 +900,42 @@ def run_premarket(config):
         logger.warning("策略健康度监控失败(不影响主流程): %s", e)
 
     recommendations = final[:max_rec]
+    _pack(ctx, dict(locals()))
+    ctx["config"] = config
 
-    # === 行业分散约束：同一行业最多推荐 1 只，同赛道最多 2 只 ===
+
+def _pm_persist(ctx):
+    (
+        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
+        atr_raw, atr_series, atr_value, bp_count, bp_engine,
+        cache_data, cap, check_date, code, db,
+        db_field, entry, entry_price, exit_price, f,
+        filtered, final, global_markets, health_note, hist,
+        history, i, ind, index_data, industry_map,
+        lookback, market_fetcher, max_per_ind, max_rec, nd,
+        news_analysis, news_factor, news_list, param_field, past,
+        past_recs, pos_info, pos_mgr, rec, rec_configs,
+        recommendations, report_content, report_path, reporter, ret,
+        rotation_data, s, score, scored_stocks, screener,
+        sec, sector_count, sentiment, sl_info, today,
+        tp_info, trade_cfg,
+    ) = ctx.unpack(
+        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
+        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
+        'cache_data', 'cap', 'check_date', 'code', 'db',
+        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
+        'filtered', 'final', 'global_markets', 'health_note', 'hist',
+        'history', 'i', 'ind', 'index_data', 'industry_map',
+        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
+        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
+        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
+        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
+        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
+        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
+        'tp_info', 'trade_cfg',
+    )
+    config = ctx["config"]
+
     try:
         industry_map = market_fetcher.get_industry_map()
         if industry_map:
@@ -1003,8 +1194,26 @@ def run_premarket(config):
     )
     report_path = reporter.save_report(report_content)
     print(f"  ✅ 盘前报告已生成: {report_path}")
+    _pack(ctx, dict(locals()))
+    ctx["config"] = config
 
-    # === 权重优化建议（基于历史因子IC分析）===
+
+def _pm_feedback(ctx):
+    (
+        _elapsed, _regime_info, _t0, candidates_df, changed,
+        cur_w, factor_data, fb, fb_result, m,
+        msg, name, opt_w, opt_weights, optimizer,
+        qualified, recommendations, scored_stocks, today, wc,
+        weights,
+    ) = ctx.unpack(
+        '_elapsed', '_regime_info', '_t0', 'candidates_df', 'changed',
+        'cur_w', 'factor_data', 'fb', 'fb_result', 'm',
+        'msg', 'name', 'opt_w', 'opt_weights', 'optimizer',
+        'qualified', 'recommendations', 'scored_stocks', 'today', 'wc',
+        'weights',
+    )
+    config = ctx["config"]
+
     try:
         from src.engine.ml_selector import FactorOptimizer
         optimizer = FactorOptimizer()
@@ -1057,8 +1266,30 @@ def run_premarket(config):
     print(f"  信号筛选: {len(qualified)} → 达标推荐: {len(recommendations)}")
     print("  9:25请执行: python run_daily.py --intraday")
     print("=" * 60)
+    _pack(ctx, dict(locals()))
+    ctx["config"] = config
 
 
-# ======================================================================
-# 盘中模式：读缓存 + 刷实时行情 + 重排序
-# ======================================================================
+class _Ctx(dict):
+    """阶段间状态容器。
+
+    unpack 对缺失键返回 None——首阶段解包未初始化名时,
+    由原代码立即重新赋值, 语义与原局部变量一致。
+    """
+
+    def unpack(self, *names):
+        return tuple(self.get(n) for n in names)
+
+
+def run_premarket(config):
+    """盘前模式编排器: 各阶段通过 ctx 传递状态。"""
+    ctx = _Ctx({"config": config})
+    _pm_init(ctx)
+    _pm_mkt(ctx)
+    _pm_sent(ctx)
+    _pm_deep(ctx)
+    _pm_guard(ctx)
+    _pm_persist(ctx)
+    _pm_feedback(ctx)
+
+
