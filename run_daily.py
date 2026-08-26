@@ -1278,6 +1278,25 @@ def run_premarket(config):
     except Exception as e:
         logger.warning("大盘择时缩减推荐失败，沿用默认推荐上限: %s", e)
 
+    # === 策略健康度层：自身推荐滚动收益持续负超额时自动降仓(风格失效自保) ===
+    try:
+        from src.engine.strategy_health import assess_strategy_health, apply_action
+        health = assess_strategy_health(db, today=today,
+                                        config=filter_cfg.get("strategy_health"))
+        if health.get("status") == "degraded":
+            before_health = max_rec
+            max_rec = apply_action(max_rec, health["action"])
+            warn_txt = (f"⚠️ 策略健康度降级: 近{health['samples']}条推荐 "
+                        f"胜率{health['win_rate']}% / 平均d5 {health['avg_d5']:+.2f}% "
+                        f"→ 推荐上限 {before_health} → {max_rec}")
+            print(f"  🩺 {warn_txt}")
+            intraday_note = (intraday_note or "") + f"【{warn_txt}】"
+        else:
+            print(f"  🩺 策略健康度: {health.get('status')} "
+                  f"(样本{health.get('samples', 0)})")
+    except Exception as e:
+        logger.warning("策略健康度监控失败(不影响主流程): %s", e)
+
     recommendations = final[:max_rec]
 
     # === 行业分散约束：同一行业最多推荐 1 只，同赛道最多 2 只 ===
@@ -2111,6 +2130,29 @@ def run_afternoon(config):
     qualified = [c for c in updated if c["afternoon_score"] >= min_score]
     final = qualified[:max_rec]
 
+    # === 策略健康度层(与盘前同口径)：风格失效时收紧午后推荐上限 ===
+    afternoon_health_note = None
+    try:
+        from src.engine.strategy_health import assess_strategy_health, apply_action
+        db_h = StockDatabase()
+        health = assess_strategy_health(db_h, today=today,
+                                        config=filter_cfg.get("strategy_health"))
+        if health.get("status") == "degraded":
+            new_max = apply_action(max_rec, health["action"])
+            if new_max != max_rec or new_max <= 1:
+                afternoon_health_note = (
+                    f"⚠️ 策略健康度降级: 近{health['samples']}条推荐 "
+                    f"胜率{health['win_rate']}% / 平均d5 {health['avg_d5']:+.2f}% "
+                    f"→ 推荐上限 {max_rec} → {new_max}")
+                print(f"  🩺 {afternoon_health_note}")
+            max_rec = new_max
+            final = final[:max_rec]
+        else:
+            print(f"  🩺 策略健康度: {health.get('status')} "
+                  f"(样本{health.get('samples', 0)})")
+    except Exception as e:
+        logger.warning("策略健康度监控失败(不影响主流程): %s", e)
+
     # 保存到数据库
     db = StockDatabase()
     for i, rec in enumerate(final, 1):
@@ -2188,6 +2230,7 @@ def run_afternoon(config):
         rotation_data=rotation_dict,
         history_records=history,
         report_role="final",
+        intraday_note=afternoon_health_note,
     )
     report_path = reporter.save_report(report_content)
 
