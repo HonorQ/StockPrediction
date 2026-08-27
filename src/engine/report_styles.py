@@ -229,9 +229,10 @@ class FactorRowBuilder:
 
         reversion_signal = factors.get("reversion_signal", "neutral")
         if reversion_signal in ["strong_buy", "buy"]:
-            add("均值回归", f"偏离20日均线{factors.get('deviation_20d', 0):.1f}%（超卖）", "", star(4))
+            # 均值回归信号: 超卖→高分(评分层加30分), 标为机会
+            add("均值回归", f"偏离20日均线{factors.get('deviation_20d', 0):.1f}%（超卖→机会）", "", star(4))
         elif reversion_signal in ["strong_sell", "sell"]:
-            add("均值回归", f"偏离20日均线{factors.get('deviation_20d', 0):.1f}%（超买）", "", "⚠️")
+            add("均值回归", f"偏离20日均线{factors.get('deviation_20d', 0):.1f}%（超买→风险）", "", "⚠️")
 
         volatility_level = factors.get("volatility_level", "")
         if volatility_level == "low":

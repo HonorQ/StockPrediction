@@ -23,12 +23,9 @@ class StockScorer:
         ("deep_research", "chip"),            # 深度研究与筹码共享60日高低点位置
     ]
 
-    # IC 校准结论(2026-08 全市场终审 reports/market_ic_verdict.json,
-    # 5273只×37截面, 无幸存者偏差):
-    #   trend 持续负(h10 t=-1.5边缘) → 反转实验保留
-    #   strategy 全市场无信号 → 反转意义有限, 保留观察
-    #   quant_behavior 全市场显著正(+0.038, t=+2.2)! 曾因小样本误判为负
-    NEGATIVE_IC_DIMS = ("trend", "strategy")
+    # 新架构(2026-08-27): 仅ashare_specific参与评分, 其余因子权重=0
+    # NEGATIVE_IC_DIMS 仅在 invert_signals=True 时生效, 新架构下无需反转
+    NEGATIVE_IC_DIMS = ()
 
     def __init__(self, weights: Dict[str, float] = None,
                  invert_signals: bool = False):
@@ -392,17 +389,25 @@ class StockScorer:
             score += 15
         return max(0, min(100, score))
     def _score_ashare_specific(self, f: Dict) -> float:
+        """ashare_specific子评分。
+
+        方向依据(2026-08-27 胜率校准):
+        ashare_specific Top10胜率58.9%, 样本外稳定(训练58.8%/测试58.9%).
+        均值回归信号: 超卖(偏离MA20负)→后续反弹概率高→给高分.
+        注意: 这与全市场IC方向相反(全市场IC为负), 但Top10选股有效.
+        """
         score = 50
 
+        # 均值回归: 超卖→高分, 超买→低分
         reversion_signal = f.get("reversion_signal", "neutral")
         if reversion_signal == "strong_buy":
-            score -= 30
+            score += 30  # 严重超卖, 反弹概率高
         elif reversion_signal == "buy":
-            score -= 15
+            score += 15  # 超卖
         elif reversion_signal == "strong_sell":
-            score += 25
+            score -= 25  # 严重超买, 回调概率高
         elif reversion_signal == "sell":
-            score += 12
+            score -= 12  # 超买
 
         volatility_score = f.get("volatility_score", 50)
         score -= (volatility_score - 50) * 0.2
@@ -731,5 +736,50 @@ def apply_chip_guard(candidates: List[Dict], config: Dict) -> List[Dict]:
         logging.getLogger("stock_prediction").warning(
             "Chip guard 剔除 %d 只获利盘压力票(z>%.1f): %s",
             len(excluded), threshold,
+            ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))
+    return kept
+
+
+def apply_ashare_guard(candidates: List[Dict], config: Dict) -> List[Dict]:
+    """ashare_specific 风控排除器：剔除截面 ashare_specific 最低 N% 的票。
+
+    依据(2026-08 组合模拟A/B):
+      - hold=5 多头年化-22%, 空头年化+8.8%, 胜率60.9%, Sharpe+0.44
+      - alpha集中在空头端, A股无做空机制下转为多头保护
+      - 排除截面 ashare_specific z-score 最低 bottom_exclude_frac 比例
+
+    返回过滤后的列表；被剔除项带 guard_reason 字段供日志/报告说明。
+    """
+    cfg = config.get("ashare_guard") or {}
+    if not cfg.get("enabled", False):
+        return candidates
+    exclude_frac = float(cfg.get("bottom_exclude_frac", 0.10))
+    min_candidates = int(cfg.get("min_candidates", 10))
+
+    if exclude_frac <= 0 or len(candidates) < min_candidates:
+        return candidates
+
+    cutoff = int(len(candidates) * exclude_frac)
+    if cutoff <= 0:
+        return candidates
+
+    sorted_cands = sorted(candidates,
+                          key=lambda x: (x.get("z_scores") or {}).get("ashare_specific", 0) or 0)
+    bottom_codes = {c["code"] for c in sorted_cands[:cutoff]}
+
+    kept, excluded = [], []
+    for c in candidates:
+        if c.get("code") in bottom_codes:
+            zs = c.get("z_scores") or {}
+            z_ashare = zs.get("ashare_specific", 0) or 0
+            c["guard_reason"] = f"ashare_specific弱信号(z={z_ashare:.2f},截面后{exclude_frac:.0%})"
+            excluded.append(c)
+        else:
+            kept.append(c)
+
+    if excluded:
+        logging.getLogger("stock_prediction").warning(
+            "Ashare guard 剔除 %d 只弱信号票(ashare_specific后%.0f%%): %s",
+            len(excluded), exclude_frac * 100,
             ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))
     return kept

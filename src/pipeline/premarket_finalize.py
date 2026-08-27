@@ -48,10 +48,11 @@ def _pm_guard(ctx):
         print(f"  (动态正交化 {len(dynamic_pairs)} 对已加载)")
     StockScorer.batch_normalize(scored_stocks, weights, extra_ortho_pairs=dynamic_pairs)
 
-    # === Alpha overlay + Chip 风控排除(全市场分层验证产物, 实盘/回测同口径) ===
-    from src.engine.scorer import apply_alpha_overlay, apply_chip_guard
-    apply_alpha_overlay(scored_stocks, config)
+    # === Chip 风控排除 + Ashare 弱信号排除(全市场分层验证产物, 实盘/回测同口径) ===
+    # alpha_overlay 已禁用(2026-08-26 组合模拟证伪多头可提取性), 不再调用
+    from src.engine.scorer import apply_chip_guard, apply_ashare_guard
     scored_stocks = apply_chip_guard(scored_stocks, config)
+    scored_stocks = apply_ashare_guard(scored_stocks, config)
 
     # 信号筛选
     print("  --- 第二层: 信号强度筛选 ---")

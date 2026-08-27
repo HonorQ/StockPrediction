@@ -21,6 +21,35 @@ filter:
   intraday_crash:
     limit_down_threshold: 30
     avg_change_threshold: -1.5
+# 分级阈值：统一控制信号强度/情绪周期/因子归因等分级判定
+# 修改任一阈值须同步全量回测验证，避免"调参幻觉"
+score_tiers:
+  # 信号强度（screener.filter_signal_strength 使用）
+  strong_signal: 70
+  # 情绪周期（ashare_specific.SentimentCycle 使用）
+  sentiment_ice: 30
+  sentiment_low: 45
+  sentiment_warm: 60
+  sentiment_hot: 75
+  # 因子归因（factor_attribution 使用）
+  factor_bullish: 60
+  factor_bearish: 40
+  # ML 预测分级（ml_selector 使用，概率值）
+  ml_bullish: 0.65
+  ml_slightly_bullish: 0.55
+  ml_slightly_bearish: 0.45
+  ml_bearish: 0.35
+  # 护城河分级（business_profile / reporter 使用）
+  moat_strong: 70
+  moat_medium: 55
+  # 反弹持续性分级（rebound_analysis 使用）
+  rebound_bullish: 70
+  rebound_slightly_bullish: 55
+  rebound_slightly_bearish: 45
+  rebound_bearish: 30
+  # 热股情绪分级（hot_stocks 使用）
+  hot_warm: 70
+  hot_cool: 50
 global_markets:
 - keyword: 道琼斯
   name: 道琼斯
@@ -159,37 +188,36 @@ regime:
       quant_behavior: 0.001
   note: 权重依据 reports/market_ic_verdict.json 全市场IC终审(2026-08)
 weights:
-  ashare_specific: 0.005
-  capital_behavior: 0.03
-  chip: 0.0296
-  circulate_holder: 0.0296
-  deep_research: 0.0351
-  dragon_tiger: 0.058
-  fundamental: 0.0611
-  holder_concentration: 0.0493
-  institutional: 0.0611
-  leader: 0.058
-  lockup_risk: 0.0396
-  margin_trading: 0.058
-  moat: 0.0396
-  national_team: 0.0396
-  news: 0.0692
-  oversold_rebound: 0.04
-  policy_event: 0.0791
-  quant_behavior: 0.04
-  relative_strength: 0.005
-  research: 0.058
-  sector_rotation: 0.0611
-  shareholder: 0.0396
-  strategy: 0.0201
-  trend: -0.0057
+  # 新架构(2026-08-27): 仅ashare_specific参与评分, 其余因子降级为数据记录
+  # 依据: 全市场24因子胜率校准, 仅ashare_specific样本外稳定(58.9%胜率)
+  ashare_specific: 1.0
+  capital_behavior: 0
+  chip: 0
+  circulate_holder: 0
+  deep_research: 0
+  dragon_tiger: 0
+  fundamental: 0
+  holder_concentration: 0
+  institutional: 0
+  leader: 0
+  lockup_risk: 0
+  margin_trading: 0
+  moat: 0
+  national_team: 0
+  news: 0
+  oversold_rebound: 0
+  policy_event: 0
+  quant_behavior: 0
+  relative_strength: 0
+  research: 0
+  sector_rotation: 0
+  shareholder: 0
+  strategy: 0
+  trend: 0
 signal_invert:
-  enabled: true
-  regimes:
-  - neutral
-  - bull
-  note: 'A/B实验结论(2026-08): neutral窗口反转d10超额+1.87 vs 基线-4.12; bull窗口+2.21 vs +1.72;
-    bear窗口反转更差(-3.21)故不启用。样本仅3窗口,建议影子模式运行1个月复核后转正'
+  enabled: false
+  regimes: []
+  note: '已禁用: 唯一评分因子(ashare_specific)不需反转, trend/strategy已不参与评分'
 alpha_overlay:
   enabled: false
   weight: 3.0
@@ -200,3 +228,8 @@ chip_guard:
   enabled: true
   z_threshold: 1.5
   note: '获利盘压力排除器: 截面chip_z>阈值剔除(分层t=-3.06全场最强负信号)'
+ashare_guard:
+  enabled: true
+  bottom_exclude_frac: 0.10
+  min_candidates: 10
+  note: 'ashare_specific弱信号排除器: 截面ashare_specific最低10%剔除(2026-08组合模拟A/B证实alpha在空头端,hold=5空头年化+8.8%/胜率60.9%)'

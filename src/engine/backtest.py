@@ -425,6 +425,7 @@ class BacktestEngine:
                 StockScorer.batch_normalize(candidates, day_weights)
                 for s, c in zip(group, candidates):
                     s["score"] = c["score"]
+                    s["z_scores"] = c.get("z_scores", {})
             else:
                 # 降级：单股票评分（无截面归一化）
                 for s in group:
@@ -465,6 +466,16 @@ class BacktestEngine:
             group = by_date[date]
             qualified = [s for s in group if s["score"] >= entry_score]
             qualified.sort(key=lambda x: -x["score"])
+
+            # ashare_guard: 排除截面 ashare_specific z-score 最低 10%(与实盘同口径)
+            # 依据: 2026-08 组合模拟A/B, hold=5 空头年化+8.8%/胜率60.9%, alpha在空头端
+            if len(qualified) >= 10:
+                exclude_n = max(1, int(len(qualified) * 0.10))
+                by_ashare = sorted(qualified,
+                                  key=lambda x: (x.get("z_scores") or {}).get("ashare_specific", 0) or 0)
+                excluded_codes = {s["stock_code"] for s in by_ashare[:exclude_n]}
+                qualified = [s for s in qualified if s["stock_code"] not in excluded_codes]
+
             picks = qualified[:top_n]
 
             held_codes = {p["code"] for p in open_positions}

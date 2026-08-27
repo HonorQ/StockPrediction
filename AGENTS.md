@@ -116,6 +116,15 @@ src/utils (helpers/log/heartbeat/proxy_manager 无业务语义的工具)
 > ml_selector 928→475行(拆出 factor_optimizer), reporter 910→605行(拆出 report_styles),
 > backtest 868→714行(拆出 risk_control), market.py _KLINE_COL_MAP bug修复。
 
+> 2026-08-27 评分体系重构:
+> - 发现24维因子中仅ashare_specific样本外稳定(训练58.8%/测试58.9%)
+> - 其余23维全部过拟合(train>50%/test<50%)
+> - 新架构: 评分=ashare_specific(权重1.0), 排除=chip_guard+ashare_guard
+> - NEGATIVE_IC_DIMS清空, signal_invert禁用
+> - 新增: scripts/fetch_us_daily.py(美股板块数据采集)
+> - 新增: scripts/weekly_health_check.py(每周胜率监控)
+> - 新增: scripts/recalibrate_by_winrate.py(胜率校准工具)
+
 - [ ] 换手率备源: 腾讯/新浪K线接口无换手率字段, 依赖 baostock 逐股补充
       (cache/turnover 7天缓存+10秒超时兜底, 首次冷启动/缓存过期仍有延迟,
       根因是数据源限制非代码缺陷, 标记为"已缓解")

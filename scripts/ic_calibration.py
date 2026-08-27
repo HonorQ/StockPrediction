@@ -24,7 +24,7 @@ import pandas as pd
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=200)
-    ap.add_argument("--min-days", type=int, default=15,
+    ap.add_argument("--min-days", type=int, default=5,
                     help="IC 样本天数低于该值的因子不做结论")
     args = ap.parse_args()
 
