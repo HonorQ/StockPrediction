@@ -18,6 +18,7 @@
 
 参考：ML_TRAINING_PLAN.md §4 阶段 1；ml_selector.calculate_ic_by_day / calculate_icir。
 """
+import logging
 import argparse
 import json
 import os
@@ -206,7 +207,8 @@ def load_raw_factor_panel(lookback_days: int = 365) -> pd.DataFrame:
     for _, row in df.iterrows():
         try:
             factors = json.loads(row["factors"]) if isinstance(row["factors"], str) else row["factors"]
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as e:
+            logging.warning("捕获异常已忽略(analyze_sub_ic.py:209): %s", e)
             continue
         if not isinstance(factors, dict) or "z_scores" in factors:
             continue

@@ -13,6 +13,7 @@ if ROOT not in sys.path:
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from src.utils.log import get_logger
+from src.utils.helpers import get_limit_pct
 
 logger = get_logger()
 
@@ -35,7 +36,13 @@ from src.pipeline.common import (  # noqa: F401
 )
 
 
-def run_afternoon(config):
+def _am_init(ctx):
+    """[午后·阶段0] 组件实例化 + 盘前缓存载入 + 运维告警检查 + 数据拉取。
+
+    初始化失败返回 False(调用方终止)；中间状态全部写入 ctx。
+    """
+    config = ctx["config"]
+
     print("=" * 60)
     print("  午后模式 — 早盘数据深度修正")
     print(f"  运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -54,7 +61,7 @@ def run_afternoon(config):
     if cache is None:
         print(f"  ❌ 未找到盘前缓存 cache/premarket_{today}.json")
         print("  → 请先运行盘前模式: python run_daily.py --premarket")
-        return
+        return False
 
     print(f"  ✅ 载入盘前候选池: {len(cache['candidates'])} 只 (计算于 {cache['run_at']})")
 
@@ -68,7 +75,7 @@ def run_afternoon(config):
     fresh = market_fetcher.get_a_share_realtime()
     if fresh.empty:
         print("  ❌ 获取行情失败")
-        return
+        return False
 
     fresh["代码_str"] = fresh["代码"].astype(str)
     price_map = {r["代码_str"]: r for _, r in fresh.iterrows()}
@@ -91,132 +98,143 @@ def run_afternoon(config):
     if not hot_df.empty:
         hot_codes.update(hot_df["股票代码"].astype(str).tolist())
 
-    # 5. 深度修正评分
-    print("\n[5/5] 基于早盘数据深度修正评分...")
-    news_factor = NewsFactor(keywords_cfg)
-    candidates = cache["candidates"]
-    bp_by_code = {c["code"]: c.get("business_profile") for c in candidates}
-    updated = []
+    ctx.update(
+        today=today, cache=cache, afternoon_alerts=afternoon_alerts,
+        filter_cfg=filter_cfg, trade_cfg=trade_cfg,
+        market_fetcher=market_fetcher, price_map=price_map,
+        money_fetcher=money_fetcher, news_list=news_list,
+        sentiment=sentiment, hot_codes=hot_codes,
+    )
+    return True
 
-    for idx, c in enumerate(candidates):
-        code = c["code"]
-        name = c["name"]
-        row = price_map.get(code)
-        if row is None:
-            continue
 
-        new_price = float(row.get("最新价", 0))
-        change_pct = float(row.get("涨跌幅", 0) or 0)
-        volume_ratio = float(row.get("量比", 0) or 0)
-        turnover = float(row.get("换手率", 0) or 0)
+def _am_rescore_one(c, idx, price_map, money_fetcher,
+                    news_factor, news_list, hot_codes, total):
+    """[午后·阶段5] 单票深度修正评分(5a~5g)；不可交易返回 None 跳过。
 
-        if new_price <= 0:
-            continue
+    修正项: 价格行为/量比/换手/资金流向/午间新闻/人气热度/盘前信号验证。
+    """
+    code = c["code"]
+    name = c["name"]
+    row = price_map.get(code)
+    if row is None:
+        return None
 
-        # 涨停/跌停过滤
-        if change_pct >= 9.5 or change_pct <= -9.5:
-            print(f"    ⛔ {name}({code}) {'涨停' if change_pct >= 9.5 else '跌停'}，跳过")
-            continue
+    new_price = float(row.get("最新价", 0))
+    change_pct = float(row.get("涨跌幅", 0) or 0)
+    volume_ratio = float(row.get("量比", 0) or 0)
+    turnover = float(row.get("换手率", 0) or 0)
 
-        afternoon_score = c["score"]
-        signals = c.get("signals", {})
+    if new_price <= 0:
+        return None
 
-        # 5a. 早盘价格行为：真金白银的趋势确认
-        old_price = c.get("premarket_price", 0)
-        if old_price > 0:
-            price_change_pct = (new_price - old_price) / old_price * 100
-            if 0.5 <= price_change_pct < 3:
-                afternoon_score += 3
-            elif 3 <= price_change_pct < 7:
-                afternoon_score += 2
-            elif -2 <= price_change_pct < -0.5:
-                afternoon_score -= 2
-            elif price_change_pct < -2:
-                afternoon_score -= 4
+    # 涨停/跌停过滤(按板块口径, 禁止硬编码9.5)
+    limit_pct = get_limit_pct(code, name)
+    if change_pct >= limit_pct - 0.5 or change_pct <= -limit_pct + 0.5:
+        print(f"    ⛔ {name}({code}) {'涨停' if change_pct >= limit_pct - 0.5 else '跌停'}，跳过")
+        return None
 
-        # 5b. 量比：真实成交意愿
-        if volume_ratio > 2:
+    afternoon_score = c["score"]
+    signals = c.get("signals", {})
+
+    # 5a. 早盘价格行为：真金白银的趋势确认
+    old_price = c.get("premarket_price", 0)
+    if old_price > 0:
+        price_change_pct = (new_price - old_price) / old_price * 100
+        if 0.5 <= price_change_pct < 3:
             afternoon_score += 3
-        elif volume_ratio > 1.5:
+        elif 3 <= price_change_pct < 7:
             afternoon_score += 2
-        elif volume_ratio > 1.2:
-            afternoon_score += 1
-        elif volume_ratio < 0.5:
-            afternoon_score -= 3
-        elif volume_ratio < 0.8:
-            afternoon_score -= 1
+        elif -2 <= price_change_pct < -0.5:
+            afternoon_score -= 2
+        elif price_change_pct < -2:
+            afternoon_score -= 4
 
-        # 5c. 换手率活跃度
-        if turnover > 5:
-            afternoon_score += 2
-        elif turnover > 3:
-            afternoon_score += 1
-        elif turnover < 0.5:
-            afternoon_score -= 1
+    # 5b. 量比：真实成交意愿
+    if volume_ratio > 2:
+        afternoon_score += 3
+    elif volume_ratio > 1.5:
+        afternoon_score += 2
+    elif volume_ratio > 1.2:
+        afternoon_score += 1
+    elif volume_ratio < 0.5:
+        afternoon_score -= 3
+    elif volume_ratio < 0.8:
+        afternoon_score -= 1
 
-        # 5d. 资金流向：主力态度
-        flow_data = money_fetcher.get_stock_fund_flow(code)
-        net_inflow = 0
-        if flow_data:
-            net_inflow = flow_data.get("main_flow", 0) or 0
-            if net_inflow > 2000:
-                afternoon_score += 5
-            elif net_inflow > 500:
-                afternoon_score += 3
-            elif net_inflow > 0:
-                afternoon_score += 2
-            elif net_inflow < -2000:
-                afternoon_score -= 5
-            elif net_inflow < -500:
-                afternoon_score -= 3
-            elif net_inflow < 0:
-                afternoon_score -= 2
+    # 5c. 换手率活跃度
+    if turnover > 5:
+        afternoon_score += 2
+    elif turnover > 3:
+        afternoon_score += 1
+    elif turnover < 0.5:
+        afternoon_score -= 1
 
-        # 5e. 午间新闻新鲜度
-        ns = news_factor.score_stock_news(code, news_list)
-        if ns > 60:
-            afternoon_score += min((ns - 50) / 10, 3)
-        elif ns < 40:
-            afternoon_score -= min((50 - ns) / 10, 3)
-
-        # 5f. 人气热度
-        if code in hot_codes:
+    # 5d. 资金流向：主力态度
+    flow_data = money_fetcher.get_stock_fund_flow(code)
+    net_inflow = 0
+    if flow_data:
+        net_inflow = flow_data.get("main_flow", 0) or 0
+        if net_inflow > 2000:
+            afternoon_score += 5
+        elif net_inflow > 500:
             afternoon_score += 3
-
-        # 5g. 信号验证：盘前预测 vs 实际走势
-        # 修复：signals.next_day_prediction 缓存的是 str(dict)，原 == "up" 恒不成立，
-        #      改为从 next_day dict 读取 bias 判断盘前看多/看空倾向
-        nd = signals.get("next_day")
-        if not isinstance(nd, dict):
-            raw = signals.get("next_day_prediction")
-            nd = raw if isinstance(raw, dict) else {}
-        bias = nd.get("bias", "neutral")
-        if bias in ("bullish", "slightly_bullish") and change_pct > 0:
+        elif net_inflow > 0:
             afternoon_score += 2
-        if bias in ("bullish", "slightly_bullish") and change_pct < -2:
+        elif net_inflow < -2000:
+            afternoon_score -= 5
+        elif net_inflow < -500:
             afternoon_score -= 3
+        elif net_inflow < 0:
+            afternoon_score -= 2
 
-        updated.append({
-            "code": code,
-            "name": name,
-            "current_price": new_price,
-            "change_pct": round(change_pct, 2),
-            "volume_ratio": volume_ratio,
-            "turnover": turnover,
-            "premarket_score": c["score"],
-            "afternoon_score": round(afternoon_score, 1),
-            "net_inflow": net_inflow,
-            "news_score": ns,
-            "strong_signals": signals.get("strategy_count", 0),
-        })
-        print(f"    [{idx+1}/{len(candidates)}] {name}({code}) "
-              f"{c['score']}→{afternoon_score:.1f}分 "
-              f"{change_pct:+.1f}% 量比{volume_ratio:.1f} 净流入{net_inflow:.0f}万")
+    # 5e. 午间新闻新鲜度
+    ns = news_factor.score_stock_news(code, news_list)
+    if ns > 60:
+        afternoon_score += min((ns - 50) / 10, 3)
+    elif ns < 40:
+        afternoon_score -= min((50 - ns) / 10, 3)
 
-    # === ML模型辅助信号（可选，不影响主流程）===
-    # 特征来源必须是盘前 factor_snapshots 的完整原始因子(与训练数据同源)。
-    # 此前传 updated 里不存在的 factors 键 → 永远 predict({}) → 特征全默认值50，
-    # 属于分布外推理的伪修正，已修复。
+    # 5f. 人气热度
+    if code in hot_codes:
+        afternoon_score += 3
+
+    # 5g. 信号验证：盘前预测 vs 实际走势
+    # 修复：signals.next_day_prediction 缓存的是 str(dict)，原 == "up" 恒不成立，
+    #      改为从 next_day dict 读取 bias 判断盘前看多/看空倾向
+    nd = signals.get("next_day")
+    if not isinstance(nd, dict):
+        raw = signals.get("next_day_prediction")
+        nd = raw if isinstance(raw, dict) else {}
+    bias = nd.get("bias", "neutral")
+    if bias in ("bullish", "slightly_bullish") and change_pct > 0:
+        afternoon_score += 2
+    if bias in ("bullish", "slightly_bullish") and change_pct < -2:
+        afternoon_score -= 3
+
+    row_out = {
+        "code": code, "name": name, "current_price": new_price,
+        "change_pct": round(change_pct, 2),
+        "volume_ratio": volume_ratio, "turnover": turnover,
+        "premarket_score": c["score"],
+        "afternoon_score": round(afternoon_score, 1),
+        "net_inflow": net_inflow, "news_score": ns,
+        "strong_signals": signals.get("strategy_count", 0),
+    }
+    print(f"    [{idx+1}/{total}] "
+          f"{name}({code}) {c['score']}→{afternoon_score:.1f}分 "
+          f"{change_pct:+.1f}% 量比{volume_ratio:.1f} 净流入{net_inflow:.0f}万")
+    return row_out
+
+
+def _am_ml_assist(ctx, updated):
+    """ML模型辅助信号（可选，不影响主流程）。
+
+    特征来源必须是盘前 factor_snapshots 的完整原始因子(与训练数据同源)。
+    此前传 updated 里不存在的 factors 键 → 永远 predict({}) → 特征全默认值50，
+    属于分布外推理的伪修正，已修复。
+    """
+    today = ctx["today"]
     try:
         from src.engine.ml_selector import MLStockSelector
         ml = MLStockSelector()
@@ -237,6 +255,34 @@ def run_afternoon(config):
     except Exception as e:
         logger.warning("ML模型预测失败(不影响主流程): %s", e)
 
+
+def _am_rescore(ctx):
+    """[午后·阶段5] 逐票深度修正评分 + ML辅助 + 排序 + 入场风险过滤。
+
+    结果 updated(风险过滤后) 与 cand_by_code 写回 ctx。
+    """
+    keywords_cfg = ctx["config"].get("keywords", {})
+    cache = ctx["cache"]
+    price_map = ctx["price_map"]
+    money_fetcher = ctx["money_fetcher"]
+    news_list = ctx["news_list"]
+    hot_codes = ctx["hot_codes"]
+    candidates = cache["candidates"]
+    bp_by_code = {c["code"]: c.get("business_profile") for c in candidates}
+
+    print("\n[5/5] 基于早盘数据深度修正评分...")
+    news_factor = NewsFactor(keywords_cfg)
+    updated = []
+    for idx, c in enumerate(candidates):
+        row_out = _am_rescore_one(c, idx, price_map, money_fetcher,
+                                  news_factor, news_list, hot_codes,
+                                  total=len(candidates))
+        if row_out is not None:
+            updated.append(row_out)
+
+    # === ML模型辅助信号 ===
+    _am_ml_assist(ctx, updated)
+
     updated.sort(key=lambda x: x["afternoon_score"], reverse=True)
 
     print("\n午后修正 Top5:")
@@ -251,6 +297,7 @@ def run_afternoon(config):
     # 盘前模式已剔除的追涨/套牢盘票，午后不能又捞回来
     # （2026-08-14 案例：紫光股份"今日大涨追涨"、智度股份"套牢盘很重"被盘前剔除，
     #  但午后模式此前不做该过滤，导致这两只高风险票被重新推荐）
+    filter_cfg = ctx["filter_cfg"]
     try:
         cand_by_code = {cc["code"]: cc for cc in candidates}
         risk_inputs = []
@@ -274,6 +321,26 @@ def run_afternoon(config):
         updated = [c for c in updated if c["code"] in kept_codes]
     except Exception as e:
         logger.warning("午后入场风险过滤失败(不影响主流程): %s", e)
+
+    ctx["updated"] = updated
+    ctx["candidates"] = candidates
+    ctx["bp_by_code"] = bp_by_code
+
+
+def _am_filter_persist(ctx):
+    """[午后·阶段6] 达标筛选 + 策略健康度降级 + DB保存 + 同步开纸面仓。
+
+    结果 final / afternoon_health_note / db / cand_by_code 写回 ctx。
+    """
+    config = ctx["config"]
+    today = ctx["today"]
+    filter_cfg = ctx["filter_cfg"]
+    trade_cfg = ctx["trade_cfg"]
+    market_fetcher = ctx["market_fetcher"]
+    afternoon_alerts = ctx["afternoon_alerts"]
+    updated = ctx["updated"]
+    candidates = ctx["candidates"]
+    cand_by_code = {cc["code"]: cc for cc in candidates}
 
     # 生成推荐（达标线与盘前/盘中统一取 config，避免三档口径漂移）
     min_score = filter_cfg.get("min_score", 53)
@@ -322,9 +389,30 @@ def run_afternoon(config):
 
     # 同步开纸面仓位：以午后实际价格为入场基准(尾盘决策的真实成本)。
     # 与盘前推荐分开归因，积累数据后即可对比"盘前 vs 午后"推荐的历史准确率
-    _open_paper_trades_for_recs(db, market_fetcher, trade_cfg, final,
+    _open_paper_trades_for_recs(db, market_fetcher, config.get("trade", {}), final,
                                  today, score_field="afternoon_score",
                                  label="午后")
+
+    ctx["final"] = final
+    ctx["afternoon_health_note"] = afternoon_health_note
+    ctx["db"] = db
+    ctx["cand_by_code"] = cand_by_code
+
+
+def _am_report(ctx):
+    """[午后·阶段7] 报告生成(合并盘前信号字段) + 总结输出。"""
+    today = ctx["today"]
+    cache = ctx["cache"]
+    db = ctx["db"]
+    final = ctx["final"]
+    updated = ctx["updated"]
+    candidates = ctx["candidates"]
+    sentiment = ctx["sentiment"]
+    trade_cfg = ctx["trade_cfg"]
+    bp_by_code = ctx["bp_by_code"]
+    cand_by_code = ctx["cand_by_code"]
+    afternoon_health_note = ctx["afternoon_health_note"]
+
     # 生成报告
     print("\n生成午后报告...")
     reporter = ReportGenerator()
@@ -402,6 +490,16 @@ def run_afternoon(config):
             print(f"  {i}. {c['name']}({c['code']}) - {c['afternoon_score']}分 {c['change_pct']:+.1f}% 净流入{c['net_inflow']:.0f}万")
     else:
         print("\n今日无达标推荐，建议观望")
+
+
+def run_afternoon(config):
+    """午后模式主入口：初始化 → 修正评分 → 筛选落库 → 报告。"""
+    ctx = {"config": config}
+    if not _am_init(ctx):
+        return
+    _am_rescore(ctx)
+    _am_filter_persist(ctx)
+    _am_report(ctx)
 
 
 # ======================================================================

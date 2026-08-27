@@ -2,9 +2,12 @@
 股东人数/筹码集中度因子（基于新浪财务数据）
 判断标准：股东总数减少=筹码集中(利好)，股东总数增加=筹码分散(利空)
 """
+import logging
 import pandas as pd
 from typing import Dict
 import os, json, time
+
+logger = logging.getLogger(__name__)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,7 +25,8 @@ class HolderConcentrationFactor:
             if os.path.exists(self._cache_file):
                 with open(self._cache_file, "r", encoding="utf-8") as f:
                     self._cache = json.load(f)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"加载缓存失败: {e}")
             self._cache = {}
 
     def _save_cache(self):
@@ -30,8 +34,8 @@ class HolderConcentrationFactor:
             os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
             with open(self._cache_file, "w", encoding="utf-8") as f:
                 json.dump(self._cache, f, ensure_ascii=False, default=str)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[holder_concentration.py:36] HolderConcentrationFactor/_save_cache 失败(忽略): %s", e)
 
     def analyze(self, stock_code: str) -> Dict:
         result = {
@@ -76,7 +80,8 @@ class HolderConcentrationFactor:
             self._save_cache()
             return self._score_from_history(history)
 
-        except Exception:
+        except Exception as e:
+            logger.warning(f"分析股东集中度失败: {e}")
             return result
 
     def _score_from_history(self, history: list) -> Dict:

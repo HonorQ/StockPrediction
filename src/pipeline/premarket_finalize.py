@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""盘前模式(07:00): 全量因子计算与候选池产出
+"""盘前模式收尾段: 归一化筛选 → 行业分散 → 候选池缓存 → 落库开仓 → 报告 → 反馈
 
 由 run_daily.py 外迁(规则 AGENTS.md 二: 入口只做参数解析/分发)。
+各阶段显式按需 unpack(禁止巨型键包往返), 状态经 ctx 传递。
 """
 import os
 import sys
@@ -29,16 +30,13 @@ from src.pipeline.common import write_summary
 
 
 def _pm_guard(ctx):
+    """截面Z-Score归一化 + alpha overlay/chip风控 + 三层筛选 + 择时与健康度降仓。"""
     (
-        _health_today, before_health, db, dynamic_pairs, filter_cfg,
-        final, final_max_rec, health, health_note, max_rec,
-        qualified, recommendations, regime, regime_filter, regime_max,
-        regime_result, scored_stocks, screener, warn_txt, weights,
+        db, filter_cfg, health_note, regime, regime_filter,
+        regime_result, scored_stocks, screener, weights,
     ) = ctx.unpack(
-        '_health_today', 'before_health', 'db', 'dynamic_pairs', 'filter_cfg',
-        'final', 'final_max_rec', 'health', 'health_note', 'max_rec',
-        'qualified', 'recommendations', 'regime', 'regime_filter', 'regime_max',
-        'regime_result', 'scored_stocks', 'screener', 'warn_txt', 'weights',
+        'db', 'filter_cfg', 'health_note', 'regime', 'regime_filter',
+        'regime_result', 'scored_stocks', 'screener', 'weights',
     )
     config = ctx["config"]
 
@@ -90,8 +88,8 @@ def _pm_guard(ctx):
     # === 策略健康度层：自身推荐滚动收益持续负超额时自动降仓(风格失效自保) ===
     try:
         from src.engine.strategy_health import assess_strategy_health, apply_action
-        _health_today = datetime.now().strftime("%Y-%m-%d")
-        health = assess_strategy_health(db, today=_health_today,
+        health_today = datetime.now().strftime("%Y-%m-%d")
+        health = assess_strategy_health(db, today=health_today,
                                         config=filter_cfg.get("strategy_health"))
         if health.get("status") == "degraded":
             before_health = max_rec
@@ -111,168 +109,54 @@ def _pm_guard(ctx):
     _pack(ctx, dict(locals()))
     ctx["config"] = config
 
-def _pm_persist_stage1(ctx):
-    """阶段4之1"""
+
+# 行业→赛道 映射与赛道容量上限(原字面量原样保留, 语义见 _pm_diversify)
+_SECTOR_GROUP_MAP = {
+    "金融行业": "金融", "房地产": "地产", "开发区": "地产",
+    "电子信息": "科技", "电子器件": "科技", "电器行业": "科技",
+    "仪器仪表": "科技", "发电设备": "科技",
+    "化工行业": "制造", "化纤行业": "制造", "塑料制品": "制造",
+    "机械行业": "制造", "纺织机械": "制造", "纺织行业": "制造",
+    "服装鞋类": "制造", "印刷包装": "制造", "造纸行业": "制造",
+    "家电行业": "制造", "家具行业": "制造", "陶瓷行业": "制造",
+    "玻璃行业": "制造", "水泥行业": "制造", "建筑建材": "制造",
+    "生物制药": "医药", "医疗器械": "医药",
+    "食品行业": "消费", "酿酒行业": "消费",
+    "商业百货": "消费", "酒店旅游": "消费",
+    "石油行业": "能源", "煤炭行业": "能源", "电力行业": "能源",
+    "交通运输": "交通", "公路桥梁": "交通", "供水供气": "公用",
+    "钢铁行业": "钢铁", "有色金属": "有色",
+    "汽车制造": "汽车", "摩托车": "汽车",
+    "飞机制造": "军工", "船舶制造": "军工",
+    "农林牧渔": "农业", "农药化肥": "农业",
+    "环保行业": "环保", "传媒娱乐": "传媒",
+    "物资外贸": "综合", "综合行业": "综合", "其它行业": "综合",
+    "次新股": "次新",
+}
+_SECTOR_CAP_MAP = {
+    "科技": 2, "制造": 2, "金融": 1, "消费": 1, "医药": 1,
+    "地产": 1, "能源": 1, "交通": 1, "钢铁": 1, "有色": 1,
+    "汽车": 1, "军工": 1, "农业": 1, "环保": 1, "传媒": 1,
+    "公用": 1, "综合": 1, "次新": 1,
+}
+
+
+def _pm_diversify(ctx):
+    """行业分散约束: 同行业/同赛道限流 + 业务画像生成(随缓存持久化)。"""
     (
-        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
-        atr_raw, atr_series, atr_value, bp_count, bp_engine,
-        cache_data, cap, check_date, code, db,
-        db_field, entry, entry_price, exit_price, f,
-        filtered, final, global_markets, health_note, hist,
-        history, i, ind, index_data, industry_map,
-        lookback, market_fetcher, max_per_ind, max_rec, nd,
-        news_analysis, news_factor, news_list, param_field, past,
-        past_recs, pos_info, pos_mgr, rec, rec_configs,
-        recommendations, report_content, report_path, reporter, ret,
-        rotation_data, s, score, scored_stocks, screener,
-        sec, sector_count, sentiment, sl_info, today,
-        tp_info, trade_cfg,
+        final, market_fetcher, max_rec, recommendations, screener,
+        scored_stocks,
     ) = ctx.unpack(
-        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
-        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
-        'cache_data', 'cap', 'check_date', 'code', 'db',
-        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
-        'filtered', 'final', 'global_markets', 'health_note', 'hist',
-        'history', 'i', 'ind', 'index_data', 'industry_map',
-        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
-        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
-        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
-        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
-        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
-        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
-        'tp_info', 'trade_cfg',
+        'final', 'market_fetcher', 'max_rec', 'recommendations', 'screener',
+        'scored_stocks',
     )
     config = ctx["config"]
 
-    (
-        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
-        atr_raw, atr_series, atr_value, bp_count, bp_engine,
-        cache_data, cap, check_date, code, db,
-        db_field, entry, entry_price, exit_price, f,
-        filtered, final, global_markets, health_note, hist,
-        history, i, ind, index_data, industry_map,
-        lookback, market_fetcher, max_per_ind, max_rec, nd,
-        news_analysis, news_factor, news_list, param_field, past,
-        past_recs, pos_info, pos_mgr, rec, rec_configs,
-        recommendations, report_content, report_path, reporter, ret,
-        rotation_data, s, score, scored_stocks, screener,
-        sec, sector_count, sentiment, sl_info, today,
-        tp_info, trade_cfg,
-    ) = ctx.unpack(
-        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
-        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
-        'cache_data', 'cap', 'check_date', 'code', 'db',
-        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
-        'filtered', 'final', 'global_markets', 'health_note', 'hist',
-        'history', 'i', 'ind', 'index_data', 'industry_map',
-        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
-        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
-        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
-        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
-        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
-        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
-        'tp_info', 'trade_cfg',
-    )
-    config = ctx["config"]
-    _pack(ctx, dict(locals()))
-    ctx['config'] = config
-
-def _pm_p2s1(ctx):
-    """阶段2之1"""
-    """阶段4之2"""
-    (
-        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
-        atr_raw, atr_series, atr_value, bp_count, bp_engine,
-        cache_data, cap, check_date, code, db,
-        db_field, entry, entry_price, exit_price, f,
-        filtered, final, global_markets, health_note, hist,
-        history, i, ind, index_data, industry_map,
-        lookback, market_fetcher, max_per_ind, max_rec, nd,
-        news_analysis, news_factor, news_list, param_field, past,
-        past_recs, pos_info, pos_mgr, rec, rec_configs,
-        recommendations, report_content, report_path, reporter, ret,
-        rotation_data, s, score, scored_stocks, screener,
-        sec, sector_count, sentiment, sl_info, today,
-        tp_info, trade_cfg,
-    ) = ctx.unpack(
-        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
-        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
-        'cache_data', 'cap', 'check_date', 'code', 'db',
-        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
-        'filtered', 'final', 'global_markets', 'health_note', 'hist',
-        'history', 'i', 'ind', 'index_data', 'industry_map',
-        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
-        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
-        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
-        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
-        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
-        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
-        'tp_info', 'trade_cfg',
-    )
-    config = ctx["config"]
-
-    """阶段4之2"""
-    (
-        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
-        atr_raw, atr_series, atr_value, bp_count, bp_engine,
-        cache_data, cap, check_date, code, db,
-        db_field, entry, entry_price, exit_price, f,
-        filtered, final, global_markets, health_note, hist,
-        history, i, ind, index_data, industry_map,
-        lookback, market_fetcher, max_per_ind, max_rec, nd,
-        news_analysis, news_factor, news_list, param_field, past,
-        past_recs, pos_info, pos_mgr, rec, rec_configs,
-        recommendations, report_content, report_path, reporter, ret,
-        rotation_data, s, score, scored_stocks, screener,
-        sec, sector_count, sentiment, sl_info, today,
-        tp_info, trade_cfg,
-    ) = ctx.unpack(
-        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
-        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
-        'cache_data', 'cap', 'check_date', 'code', 'db',
-        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
-        'filtered', 'final', 'global_markets', 'health_note', 'hist',
-        'history', 'i', 'ind', 'index_data', 'industry_map',
-        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
-        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
-        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
-        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
-        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
-        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
-        'tp_info', 'trade_cfg',
-    )
-    config = ctx["config"]
     try:
         industry_map = market_fetcher.get_industry_map()
         if industry_map:
-            SECTOR_GROUP = {
-                "金融行业": "金融", "房地产": "地产", "开发区": "地产",
-                "电子信息": "科技", "电子器件": "科技", "电器行业": "科技",
-                "仪器仪表": "科技", "发电设备": "科技",
-                "化工行业": "制造", "化纤行业": "制造", "塑料制品": "制造",
-                "机械行业": "制造", "纺织机械": "制造", "纺织行业": "制造",
-                "服装鞋类": "制造", "印刷包装": "制造", "造纸行业": "制造",
-                "家电行业": "制造", "家具行业": "制造", "陶瓷行业": "制造",
-                "玻璃行业": "制造", "水泥行业": "制造", "建筑建材": "制造",
-                "生物制药": "医药", "医疗器械": "医药",
-                "食品行业": "消费", "酿酒行业": "消费",
-                "商业百货": "消费", "酒店旅游": "消费",
-                "石油行业": "能源", "煤炭行业": "能源", "电力行业": "能源",
-                "交通运输": "交通", "公路桥梁": "交通", "供水供气": "公用",
-                "钢铁行业": "钢铁", "有色金属": "有色",
-                "汽车制造": "汽车", "摩托车": "汽车",
-                "飞机制造": "军工", "船舶制造": "军工",
-                "农林牧渔": "农业", "农药化肥": "农业",
-                "环保行业": "环保", "传媒娱乐": "传媒",
-                "物资外贸": "综合", "综合行业": "综合", "其它行业": "综合",
-                "次新股": "次新",
-            }
-            SECTOR_CAP = {
-                "科技": 2, "制造": 2, "金融": 1, "消费": 1, "医药": 1,
-                "地产": 1, "能源": 1, "交通": 1, "钢铁": 1, "有色": 1,
-                "汽车": 1, "军工": 1, "农业": 1, "环保": 1, "传媒": 1,
-                "公用": 1, "综合": 1, "次新": 1,
-            }
+            SECTOR_GROUP = _SECTOR_GROUP_MAP
+            SECTOR_CAP = _SECTOR_CAP_MAP
             max_per_ind = 2 if max_rec >= 4 else 1
             for s in final:
                 code = s.get("code", "")
@@ -315,41 +199,21 @@ def _pm_p2s1(ctx):
     _pack(ctx, dict(locals()))
     ctx['config'] = config
 
-def _pm_p2s2(ctx):
-    """阶段2之2"""
-    """阶段4之2"""
+
+def _pm_cache_candidates(ctx):
+    """候选池落盘 cache/premarket_YYYY-MM-DD.json, 供盘中(9:25)/午后(14:40)复用。"""
     (
-        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
-        atr_raw, atr_series, atr_value, bp_count, bp_engine,
-        cache_data, cap, check_date, code, db,
-        db_field, entry, entry_price, exit_price, f,
-        filtered, final, global_markets, health_note, hist,
-        history, i, ind, index_data, industry_map,
-        lookback, market_fetcher, max_per_ind, max_rec, nd,
-        news_analysis, news_factor, news_list, param_field, past,
-        past_recs, pos_info, pos_mgr, rec, rec_configs,
-        recommendations, report_content, report_path, reporter, ret,
-        rotation_data, s, score, scored_stocks, screener,
-        sec, sector_count, sentiment, sl_info, today,
-        tp_info, trade_cfg,
+        _regime_info, global_markets, index_data, news_analysis, rotation_data,
+        score, sentiment, scored_stocks, trade_cfg,
     ) = ctx.unpack(
-        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
-        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
-        'cache_data', 'cap', 'check_date', 'code', 'db',
-        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
-        'filtered', 'final', 'global_markets', 'health_note', 'hist',
-        'history', 'i', 'ind', 'index_data', 'industry_map',
-        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
-        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
-        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
-        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
-        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
-        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
-        'tp_info', 'trade_cfg',
+        '_regime_info', 'global_markets', 'index_data', 'news_analysis', 'rotation_data',
+        'score', 'sentiment', 'scored_stocks', 'trade_cfg',
     )
     config = ctx["config"]
 
+    # 注意: _pack 排除 '_' 开头键, 此处 today 以普通名进入 ctx 供后续阶段使用
     today = datetime.now().strftime("%Y-%m-%d")
+
     cache_data = {
         "date": today,
         "run_at": datetime.now().strftime("%H:%M:%S"),
@@ -400,79 +264,15 @@ def _pm_p2s2(ctx):
     print(f"\n  ✅ 候选池已缓存 → cache/premarket_{today}.json ({len(cache_data['candidates'])}只)")
     _pack(ctx, dict(locals()))
     ctx['config'] = config
-    _pack(ctx, dict(locals()))
-    ctx['config'] = config
 
-def _pm_persist_stage2(ctx):
-    """编排器(原实现按段切分, 状态经ctx传递)。"""
-    _pm_p2s1(ctx)
-    _pm_p2s2(ctx)
 
-def _pm_p3s1(ctx):
-    """阶段2之1"""
-    """阶段4之3"""
-    (
-        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
-        atr_raw, atr_series, atr_value, bp_count, bp_engine,
-        cache_data, cap, check_date, code, db,
-        db_field, entry, entry_price, exit_price, f,
-        filtered, final, global_markets, health_note, hist,
-        history, i, ind, index_data, industry_map,
-        lookback, market_fetcher, max_per_ind, max_rec, nd,
-        news_analysis, news_factor, news_list, param_field, past,
-        past_recs, pos_info, pos_mgr, rec, rec_configs,
-        recommendations, report_content, report_path, reporter, ret,
-        rotation_data, s, score, scored_stocks, screener,
-        sec, sector_count, sentiment, sl_info, today,
-        tp_info, trade_cfg,
-    ) = ctx.unpack(
-        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
-        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
-        'cache_data', 'cap', 'check_date', 'code', 'db',
-        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
-        'filtered', 'final', 'global_markets', 'health_note', 'hist',
-        'history', 'i', 'ind', 'index_data', 'industry_map',
-        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
-        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
-        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
-        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
-        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
-        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
-        'tp_info', 'trade_cfg',
-    )
+def _pm_position_plan(ctx):
+    """paper_trades 持仓维护 + 为每只推荐计算 ATR止损/止盈/仓位 配置。"""
+    market_fetcher, recommendations, trade_cfg = ctx.unpack(
+        'market_fetcher', 'recommendations', 'trade_cfg')
     config = ctx["config"]
+    today = datetime.now().strftime("%Y-%m-%d")
 
-    """阶段4之3"""
-    (
-        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
-        atr_raw, atr_series, atr_value, bp_count, bp_engine,
-        cache_data, cap, check_date, code, db,
-        db_field, entry, entry_price, exit_price, f,
-        filtered, final, global_markets, health_note, hist,
-        history, i, ind, index_data, industry_map,
-        lookback, market_fetcher, max_per_ind, max_rec, nd,
-        news_analysis, news_factor, news_list, param_field, past,
-        past_recs, pos_info, pos_mgr, rec, rec_configs,
-        recommendations, report_content, report_path, reporter, ret,
-        rotation_data, s, score, scored_stocks, screener,
-        sec, sector_count, sentiment, sl_info, today,
-        tp_info, trade_cfg,
-    ) = ctx.unpack(
-        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
-        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
-        'cache_data', 'cap', 'check_date', 'code', 'db',
-        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
-        'filtered', 'final', 'global_markets', 'health_note', 'hist',
-        'history', 'i', 'ind', 'index_data', 'industry_map',
-        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
-        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
-        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
-        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
-        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
-        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
-        'tp_info', 'trade_cfg',
-    )
-    config = ctx["config"]
     db = StockDatabase()
     try:
         _update_open_paper_trades(db, market_fetcher, trade_cfg, today)
@@ -496,7 +296,8 @@ def _pm_p3s1(ctx):
                         atr_series = atr_calc.calculate_atr(hist)
                         atr_raw = float(atr_series.iloc[-1]) if not atr_series.empty else 0
                         atr_value = atr_raw if atr_raw > entry_price * 0.005 else 0
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"计算ATR失败: {e}")
                     atr_value = 0
 
             pos_info = pos_mgr.calculate_position(score, account_capital, max(entry_price, 1))
@@ -520,39 +321,19 @@ def _pm_p3s1(ctx):
     _pack(ctx, dict(locals()))
     ctx['config'] = config
 
-def _pm_p3s2(ctx):
-    """阶段2之2"""
-    """阶段4之3"""
+
+def _pm_save_and_open(ctx):
+    """推荐落库 + 同步开纸面仓 + 因子快照落库 + 历史推荐收益回填。"""
     (
-        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
-        atr_raw, atr_series, atr_value, bp_count, bp_engine,
-        cache_data, cap, check_date, code, db,
-        db_field, entry, entry_price, exit_price, f,
-        filtered, final, global_markets, health_note, hist,
-        history, i, ind, index_data, industry_map,
-        lookback, market_fetcher, max_per_ind, max_rec, nd,
-        news_analysis, news_factor, news_list, param_field, past,
-        past_recs, pos_info, pos_mgr, rec, rec_configs,
-        recommendations, report_content, report_path, reporter, ret,
-        rotation_data, s, score, scored_stocks, screener,
-        sec, sector_count, sentiment, sl_info, today,
-        tp_info, trade_cfg,
+        _regime_info, market_fetcher, rec_configs, recommendations, scored_stocks,
+        trade_cfg,
     ) = ctx.unpack(
-        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
-        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
-        'cache_data', 'cap', 'check_date', 'code', 'db',
-        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
-        'filtered', 'final', 'global_markets', 'health_note', 'hist',
-        'history', 'i', 'ind', 'index_data', 'industry_map',
-        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
-        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
-        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
-        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
-        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
-        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
-        'tp_info', 'trade_cfg',
+        '_regime_info', 'market_fetcher', 'rec_configs', 'recommendations', 'scored_stocks',
+        'trade_cfg',
     )
     config = ctx["config"]
+    today = datetime.now().strftime("%Y-%m-%d")
+    db = StockDatabase()
 
     for i, rec in enumerate(recommendations, 1):
         db.save_recommendation(
@@ -572,7 +353,7 @@ def _pm_p3s2(ctx):
             # 避免重复建仓：同一股票已有未平仓仓位时跳过
             if db.has_open_position(code):
                 continue
-            config = rec_configs.get(code, trade_cfg)
+            tcfg = rec_configs.get(code, trade_cfg)
             db.open_paper_trade(
                 trade_date=today,
                 code=code,
@@ -580,8 +361,8 @@ def _pm_p3s2(ctx):
                 score=rec["score"],
                 entry_price=rec.get("current_price", 0),
                 position_pct=rec["factors"].get("position_pct"),
-                shares=config.get("shares"),
-                trade_config=config,
+                shares=tcfg.get("shares"),
+                trade_config=tcfg,
             )
         except Exception as e:
             logger.warning("开仓失败 %s: %s", code, e)
@@ -621,44 +402,16 @@ def _pm_p3s2(ctx):
         logger.warning("更新历史表现失败: %s", e)
     _pack(ctx, dict(locals()))
     ctx['config'] = config
-    _pack(ctx, dict(locals()))
-    ctx['config'] = config
 
-def _pm_persist_stage3(ctx):
-    """编排器(原实现按段切分, 状态经ctx传递)。"""
-    _pm_p3s1(ctx)
-    _pm_p3s2(ctx)
 
-def _pm_persist_stage4(ctx):
-    """阶段4之4"""
+def _pm_report(ctx):
+    """盘前研究报告生成与落盘。"""
     (
-        SECTOR_CAP, SECTOR_GROUP, _regime_info, account_capital, atr_calc,
-        atr_raw, atr_series, atr_value, bp_count, bp_engine,
-        cache_data, cap, check_date, code, db,
-        db_field, entry, entry_price, exit_price, f,
-        filtered, final, global_markets, health_note, hist,
-        history, i, ind, index_data, industry_map,
-        lookback, market_fetcher, max_per_ind, max_rec, nd,
-        news_analysis, news_factor, news_list, param_field, past,
-        past_recs, pos_info, pos_mgr, rec, rec_configs,
-        recommendations, report_content, report_path, reporter, ret,
-        rotation_data, s, score, scored_stocks, screener,
-        sec, sector_count, sentiment, sl_info, today,
-        tp_info, trade_cfg,
+        db, global_markets, health_note, index_data, news_factor,
+        news_list, recommendations, rotation_data, sentiment, trade_cfg,
     ) = ctx.unpack(
-        'SECTOR_CAP', 'SECTOR_GROUP', '_regime_info', 'account_capital', 'atr_calc',
-        'atr_raw', 'atr_series', 'atr_value', 'bp_count', 'bp_engine',
-        'cache_data', 'cap', 'check_date', 'code', 'db',
-        'db_field', 'entry', 'entry_price', 'exit_price', 'f',
-        'filtered', 'final', 'global_markets', 'health_note', 'hist',
-        'history', 'i', 'ind', 'index_data', 'industry_map',
-        'lookback', 'market_fetcher', 'max_per_ind', 'max_rec', 'nd',
-        'news_analysis', 'news_factor', 'news_list', 'param_field', 'past',
-        'past_recs', 'pos_info', 'pos_mgr', 'rec', 'rec_configs',
-        'recommendations', 'report_content', 'report_path', 'reporter', 'ret',
-        'rotation_data', 's', 'score', 'scored_stocks', 'screener',
-        'sec', 'sector_count', 'sentiment', 'sl_info', 'today',
-        'tp_info', 'trade_cfg',
+        'db', 'global_markets', 'health_note', 'index_data', 'news_factor',
+        'news_list', 'recommendations', 'rotation_data', 'sentiment', 'trade_cfg',
     )
     config = ctx["config"]
 
@@ -681,24 +434,19 @@ def _pm_persist_stage4(ctx):
     print(f"  ✅ 盘前报告已生成: {report_path}")
     _pack(ctx, dict(locals()))
     ctx["config"] = config
-    _pack(ctx, dict(locals()))
-    ctx['config'] = config
+
 
 def _pm_feedback(ctx):
+    """因子IC权重优化建议 + 反馈循环(归因/IC衰减/自适应调权/ML重训练) + 运行总结。"""
     (
-        _elapsed, _regime_info, _t0, candidates_df, changed,
-        cur_w, factor_data, fb, fb_result, m,
-        msg, name, opt_w, opt_weights, optimizer,
-        qualified, recommendations, scored_stocks, today, wc,
+        candidates_df, qualified, recommendations, scored_stocks, t0,
         weights,
     ) = ctx.unpack(
-        '_elapsed', '_regime_info', '_t0', 'candidates_df', 'changed',
-        'cur_w', 'factor_data', 'fb', 'fb_result', 'm',
-        'msg', 'name', 'opt_w', 'opt_weights', 'optimizer',
-        'qualified', 'recommendations', 'scored_stocks', 'today', 'wc',
+        'candidates_df', 'qualified', 'recommendations', 'scored_stocks', 't0',
         'weights',
     )
     config = ctx["config"]
+    _regime_info = ctx.get("_regime_info")
 
     try:
         from src.engine.ml_selector import FactorOptimizer
@@ -723,7 +471,7 @@ def _pm_feedback(ctx):
     try:
         from src.engine.feedback_loop import FeedbackLoop
         fb = FeedbackLoop(config)
-        fb_result = fb.run_all(today)
+        fb_result = fb.run_all(today=datetime.now().strftime("%Y-%m-%d"))
         if fb_result.get("attribution_done") and fb_result.get("n_attributions", 0) > 0:
             print(f"\n  🔄 反馈循环: 归因 {fb_result['n_attributions']} 条")
         if fb_result.get("weight_adjusted"):
@@ -745,7 +493,7 @@ def _pm_feedback(ctx):
                    regime=(_regime_info or {}).get("regime") if _regime_info else None,
                    regime_score=(_regime_info or {}).get("score") if _regime_info else None)
 
-    _elapsed = (datetime.now() - _t0).total_seconds()
+    _elapsed = (datetime.now() - t0).total_seconds()
     print("\n" + "=" * 60)
     print(f"  盘前模式完成! 总耗时: {_elapsed:.0f}s")
     print(f"  候选池: {len(candidates_df)} → 深度计算: {len(scored_stocks)}")
@@ -757,13 +505,13 @@ def _pm_feedback(ctx):
 
 
 def _pm_persist(ctx):
-    """候选池缓存 + DB保存推荐 + 开纸面仓 + 收益回填 + 报告生成 编排器。"""
-    _pm_persist_stage1(ctx)
-    _pm_p2s1(ctx)
-    _pm_p2s2(ctx)
-    _pm_persist_stage2(ctx)
-    _pm_p3s1(ctx)
-    _pm_p3s2(ctx)
-    _pm_persist_stage3(ctx)
-    _pm_persist_stage4(ctx)
+    """持久化编排器: 分散 → 缓存 → 仓位计划 → 落库开仓 → 报告。
 
+    注意各阶段严格单次执行: _update_open_paper_trades/save_recommendation
+    等操作非幂等, 禁止重复调用(2026-08 修复双跑缺陷)。
+    """
+    _pm_diversify(ctx)
+    _pm_cache_candidates(ctx)
+    _pm_position_plan(ctx)
+    _pm_save_and_open(ctx)
+    _pm_report(ctx)

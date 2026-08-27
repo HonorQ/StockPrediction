@@ -17,6 +17,7 @@
 用法: python scripts/rebuild_market_panel.py [--workers 6] [--fresh]
 输出: reports/market_panel_daily.csv (断点续存) + reports/market_ic_verdict.json
 """
+import logging
 import os
 import sys
 import glob
@@ -47,7 +48,8 @@ def _load_all_klines():
                 for c, rows in pickle.load(f).items():
                     if rows and (c not in kc or len(rows) > len(kc[c])):
                         kc[c] = rows
-        except Exception:
+        except Exception as e:
+            logging.warning("捕获异常已忽略(scripts/rebuild_market_panel.py:50): %s", e)
             continue
 
     # 一级补充：fetch_1year 缓存(标准 baostock 行)
@@ -68,7 +70,8 @@ def _load_all_klines():
                         rows = pickle.load(f)
                     if rows and len(rows) >= 60:
                         kc[code] = rows
-                except Exception:
+                except Exception as e:
+                    logging.warning("捕获异常已忽略(scripts/rebuild_market_panel.py:71): %s", e)
                     continue
     return kc
 
@@ -82,7 +85,8 @@ def _init_worker():
 def _f(v):
     try:
         return float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logging.warning("捕获异常已忽略(scripts/rebuild_market_panel.py:85): %s", e)
         return None
 
 

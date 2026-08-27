@@ -78,7 +78,8 @@ def _to_float(v, default=0.0):
         return default
     try:
         return float(v)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.warning("捕获异常已忽略(run_backtest.py:81): %s", e)
         return default
 
 
@@ -103,7 +104,8 @@ def _load_fetch1year_cache(codes):
         try:
             with open(index_path, "r", encoding="utf-8") as f:
                 known_codes = set(json.load(f))
-        except Exception:
+        except Exception as e:
+            logger.warning("读取指数已知代码文件失败, 回测将不按已知列表过滤: %s", e)
             known_codes = None
 
     min_start = (datetime.strptime(WINDOW_START, "%Y-%m-%d") - timedelta(days=85)).strftime("%Y-%m-%d")
@@ -120,7 +122,8 @@ def _load_fetch1year_cache(codes):
                 rows = pickle.load(f)
             if rows and rows[0][0] <= min_start and rows[-1][0] >= WINDOW_END:
                 out[code] = rows
-        except Exception:
+        except Exception as e:
+            logger.warning("加载缓存K线失败 %s: %s", p, e)
             continue
     return out
 
@@ -168,7 +171,8 @@ def prefetch(stocks, start, end):
             _, r = fetch_kline(c, start, end)
             if r:
                 data[c] = r
-        except Exception:
+        except Exception as e:
+            logger.warning("获取 %s K线失败: %s", c, e)
             fails += 1
         if i % 500 == 0:
             rate = i / max(time.time() - t0, 1)
@@ -278,7 +282,8 @@ def _load_local_stock_list():
         with open(idx, "r", encoding="utf-8") as f:
             codes = json.load(f)
         return [(c, "") for c in codes]
-    except Exception:
+    except Exception as e:
+        logger.warning("读取指数成分文件失败: %s", e)
         return []
 
 

@@ -47,8 +47,8 @@ class ConceptMap:
                     for k, v in auto.get("concepts", {}).items():
                         if k not in base.get("concepts", {}):
                             base.setdefault("concepts", {})[k] = v
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[concept_map.py:50] ConceptMap/_load 失败(忽略): %s", e)
         return base
 
     def maybe_sync_from_akshare(self, force: bool = False) -> bool:
@@ -63,8 +63,8 @@ class ConceptMap:
                 mtime = os.path.getmtime(self.sync_cache_path)
                 if (time.time() - mtime) < 7 * 86400:
                     return False  # 缓存未过期
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[concept_map.py:66] ConceptMap/maybe_sync_from_akshare 失败(忽略): %s", e)
 
         try:
             import akshare as ak
@@ -96,7 +96,8 @@ class ConceptMap:
                         "auto_synced": True,
                     }
                     synced_count += 1
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"同步概念板块失败: {e}")
                     continue
 
             # 写入缓存

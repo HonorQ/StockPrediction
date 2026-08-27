@@ -17,9 +17,9 @@
 |---|---|---|
 | 入口脚本(根目录 run_*.py) | 500 | **800** |
 | 业务模块(src/**) | 600 | **1000** |
-| 单个函数 | — | **120** |
+| 单个函数 | — | **120**(评审线, 见函数规范) |
 
-超过硬上限必须拆分; 超过软上限应在下次触碰该文件时顺手拆分。
+文件级超硬上限必须拆分; 超过软上限应在下次触碰该文件时顺手拆分。
 当前欠账(2026-08-26): run_daily.py 2273行 / database.py 1365行 / reporter.py 902行,
 逐步偿还, 新代码严禁再加重。
 
@@ -43,7 +43,19 @@ src/utils (helpers/log/heartbeat/proxy_manager 无业务语义的工具)
 
 ### 函数规范
 - 单一职责: 一个函数只做一个阶段的事(取数→算因子→评分→落库 各自独立可测)。
-- 超过 5 个局部状态的流水线函数应拆为多个子函数, 用 dataclass/dict 显式传递上下文。
+- **单函数 120 行是评审线, 不是强制线**: 触发即评审, 不为拆而拆。满足任一豁免条件
+  可保持长函数:
+  - 线性数据流/单入口单出口/无深层嵌套 → 用 `# === 阶段N: xxx ===` 注释分节即可;
+  - 拆分需引入 >6 个变量的状态容器或 ctx 键包 → 说明耦合是本质的, 保持内聚。
+- **必须拆的是结构信号, 与行数无关**: 嵌套深度>3、同逻辑重复出现、
+  修一处需理解全函数、分支组合爆炸。规则惩罚"深而绕", 不是"长而直"。
+- **拆分收益原则**: 只有当独立可测/复用/命名自解释三者居其一时才拆;
+  禁止拆出只有一个调用点、纯凑行数的转发函数(62变量unpack的教训)。
+- **ctx.unpack 键清单超过 ~10 个即坏味道**: 应改为显式传依赖对象
+  (dataclass 或直接传 fetcher/scorer 实例); 字符串键无静态检查,
+  拼错静默返回 None 比长函数更危险。
+- 流水线上下文确需跨阶段传递时用 dataclass/dict 显式传递, 禁止闭包隐式共享;
+  原"超过5个局部状态应拆"条款废止——状态数量本身不构成拆分理由(2026-08-26修订)。
 - 可选参数一律给默认值并写进 docstring; 布尔开关用显式参数而非环境变量(回测对比除外)。
 
 ## 三、编码红线(每条都是血泪史)
@@ -95,9 +107,16 @@ src/utils (helpers/log/heartbeat/proxy_manager 无业务语义的工具)
 
 ## 七、已知技术债(按危害排序, 领取任务前先看这里)
 
-- [ ] run_daily.py 拆分: 盘前/午后流水线函数仍在入口文件(部分工具已外迁)
-- [ ] reporter.py: HTML模板与生成逻辑耦合, 近千行
-- [ ] market_data.py: 内存缓存 TTL 已加但腾讯/新浪源换手率仍靠 baostock 补
-- [ ] database.py: paper_trades 统计口径/get_paper_trade_stats 的 NULL 处理已修,
-      但缺统一的 repository 层
-- [ ] 阈值配置化: 因子打分段(90/70/50/30)仍是字面量
+> 2026-08-26 偿还记录: run_daily.py 2273→128行(pipeline/包), database.py 1365→db/组合壳,
+> reporter.py 902→788(CSS外移), _pm_* 巨型键包全部清除(62键→按需≤19),
+> premarket_finalize 双跑编排/config污染/计时丢失三处缺陷修复,
+> 归因时序衰减合并为 feedback_loop.recency_decay 单一口径,
+> 阈值配置化(score_tiers config.yaml段 + load_score_tiers加载器),
+> market_data 975→526行(拆出 industry_mapper/global_market_fetcher/kline_fetcher),
+> ml_selector 928→475行(拆出 factor_optimizer), reporter 910→605行(拆出 report_styles),
+> backtest 868→714行(拆出 risk_control), market.py _KLINE_COL_MAP bug修复。
+
+- [ ] 换手率备源: 腾讯/新浪K线接口无换手率字段, 依赖 baostock 逐股补充
+      (cache/turnover 7天缓存+10秒超时兜底, 首次冷启动/缓存过期仍有延迟,
+      根因是数据源限制非代码缺陷, 标记为"已缓解")
+- [ ] database.py repository 层: db/ Mixin 拆分已完成, 统一 repository 抽象仍缺

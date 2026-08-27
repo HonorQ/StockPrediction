@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict
 
-from src.utils.helpers import get_limit_pct
+from src.utils.helpers import get_limit_pct, load_score_tiers
 
 
 class AShareCharacteristics:
@@ -245,8 +245,8 @@ class AShareCharacteristics:
 class SentimentCycle:
     """情绪周期因子"""
 
-    def __init__(self):
-        pass
+    def __init__(self, config: dict = None):
+        self._tiers = load_score_tiers(config)
 
     def analyze(self, market_sentiment: Dict, df: pd.DataFrame = None) -> Dict:
         """
@@ -262,24 +262,25 @@ class SentimentCycle:
         if market_sentiment is None:
             return result
 
+        t = self._tiers
         emotion_score = market_sentiment.get("emotion_score", 50)
         limit_up = market_sentiment.get("limit_up", 0)
         limit_down = market_sentiment.get("limit_down", 0)
 
         # 判断情绪周期
-        if emotion_score < 30:
+        if emotion_score < t["sentiment_ice"]:
             result["cycle_phase"] = "冰点"
             result["cycle_score"] = 90  # 冰点是买入机会
             result["suggestion"] = "市场情绪冰点，可逢低布局"
-        elif emotion_score < 45:
+        elif emotion_score < t["sentiment_low"]:
             result["cycle_phase"] = "低迷"
             result["cycle_score"] = 70
             result["suggestion"] = "市场低迷，适合左侧布局"
-        elif emotion_score > 75:
+        elif emotion_score > t["sentiment_hot"]:
             result["cycle_phase"] = "亢奋"
             result["cycle_score"] = 10  # 亢奋是卖出机会
             result["suggestion"] = "市场亢奋，注意风险"
-        elif emotion_score > 60:
+        elif emotion_score > t["sentiment_warm"]:
             result["cycle_phase"] = "回暖"
             result["cycle_score"] = 60
             result["suggestion"] = "市场回暖，可适度参与"

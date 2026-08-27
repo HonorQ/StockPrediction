@@ -7,6 +7,7 @@
   3. 通过政策传导链映射到受影响行业/个股
   4. 综合评分：政策影响力度×时效性×行业匹配度
 """
+import logging
 import os
 import json
 import math
@@ -14,6 +15,8 @@ from typing import Dict, List
 from datetime import datetime
 
 from src.factors.macro_event import MacroEventDetector
+
+logger = logging.getLogger(__name__)
 
 
 class PolicyEventFactor:
@@ -53,8 +56,8 @@ class PolicyEventFactor:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[policy_event.py:59] PolicyEventFactor/_load_policy_chain 失败(忽略): %s", e)
         return {}
 
     # ----------------------------------------------------------------
@@ -249,7 +252,8 @@ class PolicyEventFactor:
         if isinstance(t, str):
             try:
                 t = datetime.strptime(t[:19], "%Y-%m-%d %H:%M:%S")
-            except Exception:
+            except Exception as e:
+                logger.warning(f"解析政策事件时间失败: {e}")
                 return 0.5
         if not isinstance(t, datetime):
             return 0.5

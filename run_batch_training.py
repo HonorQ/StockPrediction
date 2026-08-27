@@ -7,6 +7,7 @@
   4. 保存到 database.factor_snapshots
   5. 训练LightGBM+RF集成模型，保存到 models/
 """
+import logging
 import sys, os, time, json, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
@@ -20,6 +21,8 @@ from src.data.database import StockDatabase
 from src.factors.technical import TechnicalFactors
 from src.engine.scorer import StockScorer
 from src.engine.ml_selector import MLStockSelector
+
+logger = logging.getLogger(__name__)
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(ROOT, "config.yaml")
@@ -70,8 +73,8 @@ def prefetch_history(stocks, days=500, max_workers=8):
             df = mf.get_stock_history(code, days=days)
             if df is not None and not df.empty:
                 return code, df
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[run_batch_training.py:76] prefetch_history/fetch_one 失败(忽略): %s", e)
         return code, None
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:

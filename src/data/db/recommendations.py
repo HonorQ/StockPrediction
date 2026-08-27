@@ -6,13 +6,110 @@
 from typing import Dict, List, Optional
 import sqlite3
 import json
+import logging
 from datetime import datetime, timedelta
 
 from src.data.database_const import SUB_SCORE_DIMS, _NumpyEncoder
 
+logger = logging.getLogger(__name__)
+
 
 class RecommendationsMixin:
     """见模块 docstring。"""
+
+    def _create_recommendations_tables(self, conn):
+        """建表: 推荐/因子快照/回测/归因域。由 _init_db 调用, 接收已开启 PRAGMA 的连接。"""
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS recommendations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                code TEXT NOT NULL,
+                name TEXT NOT NULL,
+                score REAL NOT NULL,
+                current_price REAL,
+                rank INTEGER DEFAULT 1,
+                mode TEXT DEFAULT 'premarket',
+                regime TEXT,
+                d1_return REAL,
+                d3_return REAL,
+                d5_return REAL,
+                d10_return REAL,
+                factors TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rec_date ON recommendations(trade_date)
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rec_code ON recommendations(code)
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS factor_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                code TEXT NOT NULL,
+                name TEXT NOT NULL,
+                score REAL,
+                sub_scores TEXT,
+                factors TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_factor_date ON factor_snapshots(trade_date)
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS backtest_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_date TEXT NOT NULL,
+                total_return REAL,
+                annual_return REAL,
+                sharpe_ratio REAL,
+                max_drawdown REAL,
+                win_rate REAL,
+                profit_loss_ratio REAL,
+                total_trades INTEGER,
+                calmar_ratio REAL,
+                params TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS factor_attribution (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                code TEXT NOT NULL,
+                name TEXT NOT NULL,
+                score REAL,
+                actual_return REAL,
+                is_failure INTEGER DEFAULT 0,
+                return_horizon INTEGER,
+                factor_results TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        # 旧库迁移：补 return_horizon 列(记录归因所用收益窗口, d14/d10/d5/d3/d1)
+        try:
+            conn.execute(
+                "ALTER TABLE factor_attribution ADD COLUMN return_horizon INTEGER")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_attr_date ON factor_attribution(trade_date)
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_attr_failure ON factor_attribution(is_failure)
+        """)
 
     def save_recommendation(self, trade_date: str, code: str, name: str,
                             score: float, price: float, rank: int = 1,
@@ -176,7 +273,8 @@ class RecommendationsMixin:
         if isinstance(sub, str):
             try:
                 sub = json.loads(sub)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"解析sub_scores失败: {e}")
                 sub = {}
         if not isinstance(sub, dict) or not sub:
             # fallback: 从独立列 sub_* 还原
@@ -208,7 +306,8 @@ class RecommendationsMixin:
         if isinstance(factors, str):
             try:
                 factors = json.loads(factors)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"解析factors失败: {e}")
                 return None
         if isinstance(factors, dict) and "z_scores" not in factors:
             return factors
@@ -216,16 +315,12 @@ class RecommendationsMixin:
 
 
     def get_factor_history(self, days: int = 365) -> List[Dict]:
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-            rows = conn.execute(
-                """SELECT * FROM factor_snapshots WHERE trade_date >= ?
-                   ORDER BY trade_date DESC""", (cutoff,)
-            ).fetchall()
-        result = []
-        for r in rows:
-            d = dict(r)
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        rows = self._fetch_all(
+            """SELECT * FROM factor_snapshots WHERE trade_date >= ?
+               ORDER BY trade_date DESC""", (cutoff,)
+        )
+        for d in rows:
             # 优先用独立列 sub_* 还原 sub_scores（新数据）；
             # 缺失时回退到 JSON sub_scores（旧数据）
             sub_from_cols = {}
@@ -242,8 +337,7 @@ class RecommendationsMixin:
                 d["sub_scores"] = {}
             if d.get("factors"):
                 d["factors"] = json.loads(d["factors"])
-            result.append(d)
-        return result
+        return rows
 
 
     def query_factor_snapshots(self, days: int = 60, min_score: float = None,

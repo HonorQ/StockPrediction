@@ -59,7 +59,8 @@ class MoneyFlowFetcher:
                             net = net.replace("亿", "00000000").replace("万", "0000")
                             try:
                                 net = float(net)
-                            except Exception:
+                            except Exception as e:
+                                logger.warning(f"解析资金流向数值失败: {e}")
                                 net = 0
                         self._ths_cache[code] = float(net) if pd.notna(net) else 0
                     self._ths_cache_time = now
@@ -173,8 +174,8 @@ class MoneyFlowFetcher:
                     if df is not None and not df.empty:
                         logger.info(f'  ✅ 获取北向持股({market}): {len(df)} 条')
                         return df
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("[money_flow.py:176] MoneyFlowFetcher/get_north_holdings_change 失败(忽略): %s", e)
 
         # 方式2: 直接调用东财datacenter API（全局代理已通过环境变量设置）
         try:

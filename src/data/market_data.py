@@ -6,12 +6,11 @@ import akshare as ak
 import pandas as pd
 import requests
 import re
-import os
 import time
 import atexit
 import threading
 from typing import Optional, Dict, List
-from datetime import datetime, timedelta
+from datetime import datetime
 
 try:
     from src.utils.log import get_logger
@@ -20,6 +19,10 @@ except Exception:
     import logging
     logger = logging.getLogger("stock_prediction")
 
+
+from src.data.industry_mapper import IndustryMapper  # noqa: F401
+from src.data.global_market_fetcher import GlobalMarketFetcher  # noqa: F401
+from src.data.kline_fetcher import KlineFetcher  # noqa: F401
 
 class _BaostockConnection:
     """baostock 进程级连接单例。
@@ -40,9 +43,8 @@ class _BaostockConnection:
                     bs.login()
                     cls._logged_in = True
                     atexit.register(cls._cleanup)
-                except Exception:
-                    # 登录失败时返回模块本身，调用方自行处理
-                    pass
+                except Exception as e:
+                    logger.warning("[market_data.py:43] _BaostockConnection/get_connection 失败(忽略): %s", e)
         return cls._instance
 
     @classmethod
@@ -51,8 +53,8 @@ class _BaostockConnection:
             try:
                 cls._instance.logout()
                 cls._logged_in = False
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[market_data.py:54] _BaostockConnection/_cleanup 失败(忽略): %s", e)
 
 
 class MarketDataFetcher:
@@ -67,6 +69,42 @@ class MarketDataFetcher:
         self._cache_ts: Dict[str, float] = {}
         self._warned_bs = False
         self._industry_map: Optional[Dict[str, str]] = None
+
+    # === 委托方法: 逻辑已拆至独立模块, 此处保持向后兼容接口 ===
+
+    def get_industry_map(self, force_refresh=False):
+        """委托给 IndustryMapper"""
+        if self._industry_map and not force_refresh:
+            return self._industry_map
+        mapper = IndustryMapper(cache_get=self._cache_get, cache_put=self._cache_put)
+        self._industry_map = mapper.get_industry_map(force_refresh=force_refresh)
+        return self._industry_map
+
+    def get_stock_industry(self, code):
+        """委托给 IndustryMapper"""
+        if not self._industry_map:
+            self.get_industry_map()
+        return self._industry_map.get(code, "未知")
+
+    def get_global_market_summary(self, config_markets):
+        """委托给 GlobalMarketFetcher"""
+        fetcher = GlobalMarketFetcher()
+        return fetcher.get_global_market_summary(config_markets)
+
+    def get_index_realtime(self):
+        """委托给 GlobalMarketFetcher"""
+        fetcher = GlobalMarketFetcher()
+        return fetcher.get_index_realtime()
+
+    def get_stock_history(self, code, days=120):
+        """历史K线获取: 腾讯→新浪→baostock 三源 failover"""
+        fetcher = KlineFetcher(cache_get=self._cache_get, cache_put=self._cache_put,
+                               cache_ts_put=lambda k, v: self._cache_ts.__setitem__(k, v))
+        return fetcher.get_stock_history(code, days=days)
+
+    def _fetch_tencent_quotes(self, codes):
+        """腾讯实时行情批量查询"""
+        return MarketDataFetcher._fetch_tencent_quotes_static(codes)
 
     def _cache_get(self, key: str):
         """带 TTL 的缓存读取，过期返回 None"""
@@ -83,103 +121,6 @@ class MarketDataFetcher:
         self._cache[key] = value
         self._cache_ts[key] = _time.time()
 
-    def get_industry_map(self, force_refresh: bool = False) -> Dict[str, str]:
-        """获取 code -> industry 映射。
-        本地缓存 data/industry_map.json，有效期 7 天。
-        首次或过期时先尝试东财 push2，失败则回退到新浪板块。
-        """
-        import os
-        import json
-
-        cache_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "data", "industry_map.json"
-        )
-
-        # 1) 内存缓存
-        if self._industry_map is not None and not force_refresh:
-            return self._industry_map
-
-        # 2) 本地文件缓存（7天有效期）
-        if not force_refresh and os.path.exists(cache_path):
-            try:
-                mtime = os.path.getmtime(cache_path)
-                if (time.time() - mtime) < 7 * 86400:
-                    with open(cache_path, "r", encoding="utf-8") as f:
-                        self._industry_map = json.load(f)
-                    if self._industry_map:
-                        return self._industry_map
-            except Exception:
-                pass
-
-        # 3) 重新构建：先试东财 push2，失败则回退到新浪
-        logger.info('  🔄 构建行业映射缓存...')
-        industry_map = self._build_industry_map_em()
-        if not industry_map:
-            logger.info('  ⚠️ 东财行业接口不可用，切换至新浪板块...')
-            industry_map = self._build_industry_map_sina()
-
-        if industry_map:
-            try:
-                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                with open(cache_path, "w", encoding="utf-8") as f:
-                    json.dump(industry_map, f, ensure_ascii=False)
-            except Exception:
-                pass
-
-        self._industry_map = industry_map
-        return industry_map
-
-    def _build_industry_map_em(self) -> Dict[str, str]:
-        try:
-            board_df = ak.stock_board_industry_name_em()
-            if board_df is None or board_df.empty:
-                return {}
-            industry_map = {}
-            board_names = board_df["板块名称"].tolist()
-            for board_name in board_names:
-                try:
-                    cons = ak.stock_board_industry_cons_em(symbol=board_name)
-                    if cons is None or cons.empty:
-                        continue
-                    code_col = "代码" if "代码" in cons.columns else "code"
-                    for code in cons[code_col].astype(str):
-                        if code not in industry_map:
-                            industry_map[code] = board_name
-                except Exception:
-                    continue
-            logger.info(f'  ✅ 东财行业映射: {len(industry_map)} 只, {len(set(industry_map.values()))} 个行业')
-            return industry_map
-        except Exception as e:
-            logger.warning("东财行业映射失败: %s", e)
-            return {}
-
-    def _build_industry_map_sina(self) -> Dict[str, str]:
-        try:
-            sectors = ak.stock_sector_spot()
-            labels = sectors["label"].tolist()
-            names = sectors["板块"].tolist()
-            industry_map = {}
-            for label, name in zip(labels, names):
-                try:
-                    df = ak.stock_sector_detail(sector=label)
-                    for _, row in df.iterrows():
-                        symbol = row["symbol"]
-                        if symbol not in industry_map:
-                            industry_map[symbol] = name
-                except Exception:
-                    continue
-            logger.info(f'  ✅ 新浪行业映射: {len(industry_map)} 只, {len(set(industry_map.values()))} 个行业')
-            return industry_map
-        except Exception as e:
-            logger.error("新浪行业映射也失败: %s", e)
-            return {}
-
-    def get_stock_industry(self, code: str) -> str:
-        """获取单只股票的行业（依赖 get_industry_map 缓存）。"""
-        if self._industry_map is None:
-            self.get_industry_map()
-        return (self._industry_map or {}).get(code, "未知")
 
     @staticmethod
     def _fetch_with_retry(fetcher_fn, max_retries=2, delay=3):
@@ -305,8 +246,8 @@ class MarketDataFetcher:
             with _cf2.ThreadPoolExecutor() as _ex2:
                 probe = _ex2.submit(_probe).result(timeout=8)
             eastmoney_ok = not (probe is None or probe.empty)
-        except Exception:
-            logger.warning("东财个股API不可达，将尝试腾讯源补充市值")
+        except Exception as e:
+            logger.warning("东财个股API不可达，将尝试腾讯源补充市值: %s", e)
 
         if eastmoney_ok:
             try:
@@ -322,8 +263,8 @@ class MarketDataFetcher:
                             mcap = float(mcap_row["value"].iloc[0]) * 1e4 if not mcap_row.empty else 0
                             shares = float(shares_row["value"].iloc[0]) * 1e4 if not shares_row.empty else 0
                             return code, {"总市值": mcap, "流通股本": shares}
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning("个股信息获取失败(%s): %s", code, e)
                     return code, {}
                 with _cf.ThreadPoolExecutor(max_workers=5) as _ex:
                     futures = {_ex.submit(_fetch_info, c): c for c in codes}
@@ -433,314 +374,13 @@ class MarketDataFetcher:
         """兼容旧接口：仅返回 {6位代码: 总市值(元)}。见 _fetch_tencent_quotes。"""
         return {c: v.get("总市值", 0) for c, v in self._fetch_tencent_quotes(codes).items()}
 
-    # ------------------------------------------------------------------
-    # 个股历史日线（技术因子计算用）
-    # ------------------------------------------------------------------
-    def get_stock_history(
-        self, stock_code: str, days: int = 120, retries: int = 1
-    ) -> pd.DataFrame:
-        """
-        获取个股日K线（前复权）
-        主源: 腾讯行情（免费快速无封禁）
-        备选: baostock
-        """
-        import re
 
-        cache_key = f"hist_{stock_code}"
-        if cache_key in self._cache:
-            cached = self._cache_get(cache_key)
-            if cached is not None:
-                return cached
-
-        clean_code = re.sub(r'^(sh|sz|bj|SH|SZ|BJ)', '', stock_code)
-        clean_code = clean_code.replace(".", "")
-
-        if stock_code.startswith(('sh', 'SH')) or clean_code.startswith(('6', '5', '9')):
-            tx_symbol = f"sh{clean_code}"
-        elif stock_code.startswith(('bj', 'BJ')):
-            tx_symbol = f"bj{clean_code}"
-        else:
-            tx_symbol = f"sz{clean_code}"
-
-        # === 主源: 腾讯行情（多域名 failover）===
-        # ifzq.gtimg.cn 与 web.ifzq.gtimg.cn 会被腾讯间歇性限流/WAF拦截，
-        # 且两者不同时失效，故按顺序逐个尝试。
-        end = datetime.now().strftime("%Y-%m-%d")
-        start = (datetime.now() - timedelta(days=days + 50)).strftime("%Y-%m-%d")
-        lookback = min(800, max(30, int(days * 1.8) + 20))
-        for host in ("ifzq.gtimg.cn", "web.ifzq.gtimg.cn"):
-            df = self._fetch_tencent_kline(
-                host, tx_symbol, start, end, lookback, days
-            )
-            if df is not None and not df.empty:
-                df = self._supplement_turnover(clean_code, df, days)
-                self._cache_put(cache_key, df)
-                return df
-
-        # === 备选: 新浪K线 ===
-        df = self._fetch_sina_kline(tx_symbol, days)
-        if df is not None and not df.empty:
-            df = self._supplement_turnover(clean_code, df, days)
-            self._cache_put(cache_key, df)
-            return df
-
-        # === 备选: baostock（带超时，复用进程级连接）===
-        bs_code = (f"sh.{clean_code}" if clean_code.startswith('6') else f"sz.{clean_code}")
-        import concurrent.futures as _cf
-        _bs_ok = False
-        _bs_data = None
-
-        def _run_bs():
-            nonlocal _bs_ok, _bs_data
-            bs = _BaostockConnection.get_connection()
-            end = datetime.now().strftime("%Y-%m-%d")
-            start = (datetime.now() - timedelta(days=days + 50)).strftime("%Y-%m-%d")
-            rs = bs.query_history_k_data_plus(
-                bs_code,
-                "date,open,high,low,close,volume,amount,turn,pctChg",
-                start_date=start, end_date=end,
-                frequency="d", adjustflag="2",
-            )
-            data = []
-            while (rs.error_code == '0') and rs.next():
-                data.append(rs.get_row_data())
-            if data:
-                _bs_data = data
-                _bs_ok = True
-
-        try:
-            with _cf.ThreadPoolExecutor() as _ex:
-                _ex.submit(_run_bs).result(timeout=8)
-            if _bs_ok and _bs_data:
-                df = pd.DataFrame(_bs_data, columns=["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额", "换手率", "涨跌幅"])
-                for col in ["开盘", "最高", "最低", "收盘", "成交量", "成交额", "换手率", "涨跌幅"]:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                df = df.tail(days).reset_index(drop=True)
-                self._cache_put(cache_key, df)
-                return df
-        except Exception as e:
-            if not self._warned_bs:
-                logger.warning("baostock(%s)也失败: %s, 该股历史数据不可用", bs_code, e)
-                self._warned_bs = True
-
-        return pd.DataFrame()
-
-    def _fetch_tencent_kline(
-        self, host: str, tx_symbol: str, start: str, end: str,
-        lookback: int, days: int,
-    ) -> Optional[pd.DataFrame]:
-        """从指定腾讯域名获取前复权日K线，成功返回标准化 DataFrame，失败返回 None。"""
-        try:
-            resp = requests.get(
-                f"https://{host}/appstock/app/fqkline/get",
-                params={"param": f"{tx_symbol},day,{start},{end},{lookback},qfq"},
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-                    "Referer": "https://gu.qq.com/",
-                },
-                timeout=8,
-            )
-            payload = resp.json()
-            item = payload.get("data", {}).get(tx_symbol, {})
-            rows = item.get("qfqday") or item.get("day") or []
-            if not rows:
-                return None
-            records = []
-            for row in rows:
-                if len(row) < 6:
-                    continue
-                # 腾讯API近年格式变更：OHLC和成交量字段可能返回 dict（如 {"pre":x,"post":y}）
-                # 用统一提取函数兼容数值/dict 两种格式
-                open_val = self._extract_tencent_value(row[1])
-                close_val = self._extract_tencent_value(row[2])
-                high_val = self._extract_tencent_value(row[3])
-                low_val = self._extract_tencent_value(row[4])
-                vol_val = self._extract_tencent_value(row[5])
-                if close_val <= 0 or vol_val < 0:
-                    continue
-                # 成交额：优先用 row[6]，否则用 close*vol*100 估算
-                amount_val = close_val * vol_val * 100
-                if len(row) > 6:
-                    amount_val = self._extract_tencent_value(
-                        row[6], default=amount_val / 10000
-                    ) * 10000
-                records.append({
-                    "日期": str(row[0]),
-                    "开盘": open_val,
-                    "收盘": close_val,
-                    "最高": high_val,
-                    "最低": low_val,
-                    "成交量": vol_val * 100,
-                    "成交额": amount_val,
-                })
-            if not records:
-                return None
-            df = pd.DataFrame(records)
-            # 腾讯日K接口无换手率字段：置 NaN 而非硬编码 0——
-            # 0 会被下游(chip筹码衰减/换手异动)当作真实"零换手"，NaN 则走降级路径
-            df["换手率"] = float("nan")
-            self._warn_no_turnover()
-            df["涨跌幅"] = df["收盘"].pct_change().fillna(0) * 100
-            return df.tail(days).reset_index(drop=True)
-        except Exception as e:
-            logger.warning("腾讯K线(%s)失败: %s", host, e)
-            return None
 
     _turnover_warned = False
 
-    @classmethod
-    def _warn_no_turnover(cls):
-        """备源缺换手率仅告警一次，避免刷屏"""
-        if not cls._turnover_warned:
-            cls._turnover_warned = True
-            logger.warning(
-                "K线备源(腾讯/新浪)无换手率字段，chip筹码衰减/换手异动因子将降级"
-                "(NaN按无衰减处理)。东财主源恢复后自动消除"
-            )
-
-    def _fetch_sina_kline(self, tx_symbol: str, days: int) -> Optional[pd.DataFrame]:
-        """新浪日K线备用源（quotes.sina.cn，免费稳定）。
-        返回标准化 DataFrame，失败返回 None。注意新浪源无成交额，用 close*volume 估算。
-        """
-        try:
-            datalen = min(1023, max(90, int(days * 1.8) + 20))
-            resp = requests.get(
-                "https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData",
-                params={"symbol": tx_symbol, "scale": "240", "ma": "no", "datalen": str(datalen)},
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-                    "Referer": "https://finance.sina.com.cn",
-                },
-                timeout=8,
-            )
-            rows = resp.json()
-            if not rows or not isinstance(rows, list):
-                return None
-            records = []
-            for row in rows:
-                try:
-                    records.append({
-                        "日期": str(row["day"]),
-                        "开盘": float(row["open"]),
-                        "收盘": float(row["close"]),
-                        "最高": float(row["high"]),
-                        "最低": float(row["low"]),
-                        # volume 单位为股，此处直接存股数；成交额用 close*volume 估算
-                        "成交量": float(row["volume"]),
-                        "成交额": float(row["close"]) * float(row["volume"]),
-                    })
-                except (KeyError, TypeError, ValueError):
-                    continue
-            if not records:
-                return None
-            df = pd.DataFrame(records)
-            # 新浪K线无换手率字段：同腾讯源处理
-            df["换手率"] = float("nan")
-            self._warn_no_turnover()
-            df["涨跌幅"] = df["收盘"].pct_change().fillna(0) * 100
-            return df.tail(days).reset_index(drop=True)
-        except Exception as e:
-            logger.warning("新浪K线(%s)失败: %s", tx_symbol, e)
-            return None
 
     _TURN_CACHE_TTL = 7 * 86400
 
-    def _supplement_turnover(self, clean_code: str, df: pd.DataFrame, days: int) -> pd.DataFrame:
-        """备源K线换手率全缺失时，用 baostock turn 字段按日期补充。
-
-        背景：换手率硬编码0曾导致 chip 筹码衰减/换手异动因子静默失效；
-        现置 NaN 后由此方法恢复真实数据。带本地缓存(7天)避免每日重复拉取；
-        baostock 调用限时 10s，失败静默保持 NaN 不影响主流程。
-        """
-        import pickle
-        import time as _time
-        import concurrent.futures as _cf
-
-        col = "换手率"
-        if col not in df.columns or df[col].notna().any():
-            return df
-        if not clean_code.startswith(("6", "5", "9", "0", "2", "3")):
-            return df  # 北交所等 baostock 不覆盖
-
-        self._warn_no_turnover()
-
-        cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))), "cache", "turnover")
-        os.makedirs(cache_dir, exist_ok=True)
-        cache_file = os.path.join(cache_dir, f"{clean_code}.pkl")
-
-        def _f(v):
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return None
-
-        turn_map = {}
-        try:
-            if os.path.exists(cache_file):
-                with open(cache_file, "rb") as f:
-                    cached_ts, cached_rows = pickle.load(f)
-                if _time.time() - cached_ts < self._TURN_CACHE_TTL:
-                    turn_map = {r[0]: _f(r[1]) for r in cached_rows if r[1] not in (None, "")}
-            if not turn_map:
-                bs_code = (f"sh.{clean_code}" if clean_code.startswith(("6", "5", "9"))
-                           else f"sz.{clean_code}")
-                start = (datetime.now() - timedelta(days=days + 50)).strftime("%Y-%m-%d")
-                rows_box = []
-
-                def _fetch():
-                    bs = _BaostockConnection.get_connection()
-                    rs = bs.query_history_k_data_plus(
-                        bs_code, "date,turn",
-                        start_date=start,
-                        end_date=datetime.now().strftime("%Y-%m-%d"),
-                        frequency="d", adjustflag="2")
-                    while rs.error_code == "0" and rs.next():
-                        rows_box.append(rs.get_row_data())
-
-                with _cf.ThreadPoolExecutor() as _ex:
-                    _ex.submit(_fetch).result(timeout=10)
-                turn_map = {r[0]: _f(r[1]) for r in rows_box if r[1] not in (None, "")}
-                with open(cache_file, "wb") as f:
-                    pickle.dump((_time.time(), rows_box), f)
-        except Exception as e:
-            logger.debug("换手率补充失败(%s): %s", clean_code, e)
-            return df
-
-        if not turn_map:
-            return df
-        dates = df["日期"].astype(str).str[:10]
-        mask = df[col].isna()
-        df.loc[mask, col] = dates[mask].map(turn_map)
-        return df
-
-    @staticmethod
-    def _extract_tencent_value(field, default: float = 0.0) -> float:
-        """统一提取腾讯K线字段值，兼容数值/字符串/dict 三种格式。
-        dict 格式常见为 {"pre": x, "post": y}，优先取 post（后复权值）。
-        """
-        if field is None:
-            return default
-        if isinstance(field, (int, float)):
-            return float(field)
-        if isinstance(field, dict):
-            # 优先 post > pre > amount > value
-            for key in ("post", "pre", "amount", "AMOUNT", "value"):
-                v = field.get(key)
-                if v is not None:
-                    try:
-                        return float(v)
-                    except (TypeError, ValueError):
-                        continue
-            return default
-        if isinstance(field, str):
-            try:
-                return float(field)
-            except ValueError:
-                return default
-        return default
 
     # ------------------------------------------------------------------
     # 外盘期货 / 指数
@@ -764,45 +404,6 @@ class MarketDataFetcher:
         "美铜": ("hf_HG", "hf"),
     }
 
-    def get_global_market_summary(self, config_markets: list) -> Dict:
-        """根据配置监控列表提取关键外盘数据。
-
-        主数据源：腾讯行情 qt.gtimg.cn（字段清晰、含涨跌幅、覆盖美股/港股/外盘期货）。
-        免费源（新浪/腾讯）无法覆盖的品种（日经225、富时中国A50、LME铜、铁矿石、
-        美元指数、美元兑人民币）返回 price='—'，避免显示误导性的 0.00%。
-        """
-        cache_key = "global_summary"
-        cached = self._cache_get(cache_key)
-        if cached is not None:
-            return self._filter_global(cached, config_markets)
-
-        all_data: Dict[str, Dict] = {}
-        needed = {}
-        for m in config_markets:
-            name = m.get("name", "")
-            if name in self._GLOBAL_MAP:
-                needed[self._GLOBAL_MAP[name][0]] = name
-
-        if needed:
-            fetched = self._fetch_tencent(list(needed.keys()))
-            for tc, (price, pct) in fetched.items():
-                name = needed[tc]
-                all_data[name] = {"name": name, "price": price, "change": pct, "available": True}
-
-        self._cache_put(cache_key, all_data)
-        return self._filter_global(all_data, config_markets)
-
-    @staticmethod
-    def _filter_global(all_data: Dict, config_markets: list) -> Dict:
-        """按配置顺序输出；未被免费源覆盖的品种标记为 '—'。"""
-        out: Dict[str, Dict] = {}
-        for m in config_markets:
-            name = m.get("name", "")
-            if name in all_data:
-                out[name] = all_data[name]
-            else:
-                out[name] = {"name": name, "price": "—", "change": 0.0, "available": False}
-        return out
 
     @staticmethod
     def _fetch_tencent(codes: List[str]) -> Dict[str, tuple]:
@@ -842,56 +443,6 @@ class MarketDataFetcher:
             logger.warning("腾讯外盘行情获取失败: %s", e)
         return result
 
-    # ------------------------------------------------------------------
-    # 指数行情
-    # ------------------------------------------------------------------
-    def get_index_realtime(self) -> Dict:
-        """获取主要指数实时行情 (Sina主力 + akshare备选)"""
-        indices = {
-            "sh000001": "上证指数",
-            "sz399001": "深证成指",
-            "sz399006": "创业板指",
-        }
-        result = {}
-        try:
-            codes = ",".join(indices.keys())
-            url = f"https://hq.sinajs.cn/list={codes}"
-            headers = {"Referer": "https://finance.sina.com.cn"}
-            resp = requests.get(url, headers=headers, timeout=10)
-            for line in resp.text.strip().split('\n'):
-                m = re.search(r'hq_str_(\w+)="([^"]+)"', line)
-                if m:
-                    code = m.group(1)
-                    data = m.group(2).split(',')
-                    name = indices.get(code, code)
-                    if len(data) > 3:
-                        price = float(data[3])
-                        prev_close = float(data[2])
-                        change = round((price - prev_close) / prev_close * 100, 2) if prev_close else 0
-                        result[name] = {"price": price, "change": change}
-        except Exception as e:
-            logger.warning("获取指数行情(Sina)失败: %s, 尝试akshare...", e)
-
-        if not result:
-            try:
-                df = ak.stock_zh_index_spot_em()
-                if df is not None:
-                    for code_raw, name in [("000001", "上证指数"), ("399001", "深证成指"), ("399006", "创业板指")]:
-                        matched = df[df["代码"] == code_raw]
-                        if not matched.empty:
-                            row = matched.iloc[0]
-                            result[name] = {
-                                "price": row.get("最新价", 0),
-                                "change": row.get("涨跌幅", 0),
-                            }
-            except Exception as e2:
-                logger.warning("获取指数行情(akshare)也失败: %s", e2)
-
-        if result:
-            for name, d in result.items():
-                icon = "📈" if d["change"] > 0 else "📉"
-                logger.info(f"  {icon} {name}: {d['price']:.2f} ({d['change']:+.2f}%)")
-        return result
 
     # ------------------------------------------------------------------
     # 涨停板 / 跌停板

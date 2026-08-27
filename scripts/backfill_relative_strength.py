@@ -8,6 +8,7 @@
 用法：
     python scripts/backfill_relative_strength.py [--limit N]   # --limit 调试用
 """
+import logging
 import os
 import sys
 import sqlite3
@@ -99,7 +100,8 @@ def main(limit):
             df = baostock_rows_to_dataframe(day_rows)
             factors = rs_calc.calculate_all(df, market_df=market_df(date))
             sub = scorer._score_relative_strength(factors)
-        except Exception:
+        except Exception as e:
+            logging.warning("捕获异常已忽略(scripts/backfill_relative_strength.py:102): %s", e)
             continue
         if not (0 <= sub <= 100):
             continue
@@ -114,7 +116,8 @@ def main(limit):
             import json
             try:
                 js = json.loads(s["sub_scores"])
-            except Exception:
+            except Exception as e:
+                logging.warning("捕获异常已忽略(scripts/backfill_relative_strength.py:117): %s", e)
                 js = None
             if isinstance(js, dict):
                 js["relative_strength"] = sub

@@ -4,6 +4,7 @@
 检测主力资金的行为模式：吸筹/拉升/出货/洗盘
 基于量价关系和价格形态分析
 """
+import logging
 import pandas as pd
 import numpy as np
 from typing import Dict
@@ -145,6 +146,7 @@ class CapitalBehaviorFactor:
             }
 
         except Exception as e:
+            logging.warning("捕获异常已忽略(src/factors/capital_behavior.py:147): %s", e)
             return {
                 "capital_behavior": "neutral",
                 "capital_behavior_confidence": 0.0,

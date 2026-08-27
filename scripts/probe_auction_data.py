@@ -10,6 +10,7 @@
 用法: python scripts/probe_auction_data.py [code]
 示例: python scripts/probe_auction_data.py sh600519
 """
+import logging
 import os
 import sys
 import json
@@ -84,6 +85,7 @@ def main():
             r = fn(code)
             status = "OK" if r else "EMPTY"
         except Exception as e:
+            logging.warning("捕获异常已忽略(scripts/probe_auction_data.py:86): %s", e)
             r = {"error": str(e)}
             status = "FAIL"
         results.append(r)

@@ -44,14 +44,16 @@ class TestPrepareTrainingData(unittest.TestCase):
     def test_numeric_threshold_keeps_legacy_behavior(self):
         data = [{"factors": {}, "future_return": 2.0},
                 {"factors": {}, "future_return": -0.5}]
-        df = self.sel.prepare_training_data(data, min_return=0.01)
+        # 百分数口径: 1.0 = 1% (与 production feedback_loop/run_batch_training 一致)
+        df = self.sel.prepare_training_data(data, min_return=1.0)
         self.assertEqual(list(df["label"]), [1, 0])
 
     def test_missing_returns_dropped_not_labeled_zero(self):
         data = [{"factors": {}, "future_return": 2.0},
                 {"factors": {}, "future_return": None},
                 {"factors": {}}]
-        df = self.sel.prepare_training_data(data, min_return=0.01)
+        # 百分数口径: 1.0 = 1%
+        df = self.sel.prepare_training_data(data, min_return=1.0)
         self.assertEqual(len(df), 1)
 
 

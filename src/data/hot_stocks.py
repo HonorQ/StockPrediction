@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Optional
 
-from src.utils.helpers import get_limit_pct
+from src.utils.helpers import get_limit_pct, load_score_tiers
 
 
 def _limit_thresholds(df: pd.DataFrame) -> Optional[np.ndarray]:
@@ -24,9 +24,10 @@ def _limit_thresholds(df: pd.DataFrame) -> Optional[np.ndarray]:
 class HotStocksFetcher:
     """热点股票获取器（全免费公开数据源）"""
 
-    def __init__(self, market_df: Optional[pd.DataFrame] = None):
+    def __init__(self, market_df: Optional[pd.DataFrame] = None, config: dict = None):
         self._cache: Dict[str, pd.DataFrame] = {}
         self._market_df = market_df
+        self._tiers = load_score_tiers(config)
 
     def set_market_data(self, df: pd.DataFrame):
         self._market_df = df
@@ -171,9 +172,9 @@ class HotStocksFetcher:
         score -= min(limit_down * 1.0, 25)
         score = max(0, min(100, score))
 
-        if score >= 70:
+        if score >= self._tiers["hot_warm"]:
             emotion_level = "🔥 偏热"
-        elif score >= 50:
+        elif score >= self._tiers["hot_cool"]:
             emotion_level = "😐 中性"
         else:
             emotion_level = "❄️ 偏冷"

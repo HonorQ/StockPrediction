@@ -17,6 +17,7 @@
 用法: python scripts/build_classic_factors.py [--workers 6]
 输出: 追加列到 reports/market_panel_daily.csv + IC报告
 """
+import logging
 import os
 import sys
 import glob
@@ -35,7 +36,8 @@ SECTION_STEP = 1
 def _f(v):
     try:
         return float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logging.warning("捕获异常已忽略(scripts/build_classic_factors.py:38): %s", e)
         return None
 
 
@@ -150,7 +152,8 @@ def _load_kc():
                 for c, rows in pickle.load(f).items():
                     if rows and (c not in kc or len(rows) > len(kc[c])):
                         kc[c] = rows
-        except Exception:
+        except Exception as e:
+            logging.warning("捕获异常已忽略(scripts/build_classic_factors.py:153): %s", e)
             continue
     return kc
 
@@ -171,7 +174,8 @@ def _work(codes):
         if rows and len(rows) >= 60:
             try:
                 out.extend(classic_factors_for((c, rows)))
-            except Exception:
+            except Exception as e:
+                logging.warning("捕获异常已忽略(scripts/build_classic_factors.py:174): %s", e)
                 continue
     return out
 

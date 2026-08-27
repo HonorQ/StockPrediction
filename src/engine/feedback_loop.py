@@ -75,8 +75,8 @@ class FeedbackLoop:
         try:
             from src.data.market_data import MarketDataFetcher
             market_fetcher = MarketDataFetcher()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[feedback_loop.py:78] FeedbackLoop/run_all 失败(忽略): %s", e)
 
         # Step 1: 因子归因
         try:
@@ -85,6 +85,7 @@ class FeedbackLoop:
             result["n_attributions"] = n_attr
             result["messages"].append(f"归因完成: {n_attr} 条")
         except Exception as e:
+            logger.warning("捕获异常已忽略(src/engine/feedback_loop.py:87): %s", e)
             result["messages"].append(f"归因失败: {e}")
 
         # Step 2: IC分析
@@ -94,6 +95,7 @@ class FeedbackLoop:
             result["ic_summary"] = ic_result
             result["messages"].append(f"IC分析完成: {len(ic_result.get('factors', {}))} 因子")
         except Exception as e:
+            logger.warning("捕获异常已忽略(src/engine/feedback_loop.py:96): %s", e)
             result["messages"].append(f"IC分析失败: {e}")
 
         # Step 3: 全局权重调整（基于归因+IC，factor-level）
@@ -105,6 +107,7 @@ class FeedbackLoop:
                     result["weight_changes"] = weight_changes
                     result["messages"].append(f"全局权重调整: {len(weight_changes)} 因子")
             except Exception as e:
+                logger.warning("捕获异常已忽略(src/engine/feedback_loop.py:107): %s", e)
                 result["messages"].append(f"权重调整失败: {e}")
 
         # Step 4: 个股因子权重调整（per-stock，新增）
@@ -119,6 +122,7 @@ class FeedbackLoop:
                         f"个股权重调整: {len(stock_changes)} 只股票 / {total} 因子"
                     )
             except Exception as e:
+                logger.warning("捕获异常已忽略(src/engine/feedback_loop.py:121): %s", e)
                 result["messages"].append(f"个股权重调整失败: {e}")
 
         # Step 5: ML重训练（可跳过）
@@ -133,6 +137,7 @@ class FeedbackLoop:
                         f"acc={retrained.get('accuracy')}"
                     )
             except Exception as e:
+                logger.warning("捕获异常已忽略(src/engine/feedback_loop.py:135): %s", e)
                 result["messages"].append(f"ML重训练失败: {e}")
 
         return result
@@ -229,8 +234,8 @@ class FeedbackLoop:
                     if v is not None:
                         sub[k] = float(v)
                 return sub
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[feedback_loop.py:232] FeedbackLoop/_get_sub_scores_for_recommendation 失败(忽略): %s", e)
         return {}
 
     @staticmethod
@@ -244,7 +249,8 @@ class FeedbackLoop:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return [tuple(p) for p in json.load(f).get("pairs", [])]
-        except Exception:
+        except Exception as e:
+            logger.warning(f"加载动态正交化配对失败: {e}")
             return []
 
     def _run_ic_analysis(self, today: str = None) -> Dict:
@@ -377,11 +383,6 @@ class FeedbackLoop:
         if not all_attr:
             return []
 
-        from collections import defaultdict
-        today_dt = datetime.strptime(today, "%Y-%m-%d")
-        self.db.get_latest_ic(days=14)
-        changes = []
-
         # 调权基准与生产 scorer 完全一致：config.yaml 静态先验 + DB 最新调权结果。
         # 原实现直接读静态 config，DB 累积多次调权后 old_weight 失真、
         # MAX_WEIGHT_CHANGE 相对错误基准做 clip → weight_history 审计链不可信
@@ -395,23 +396,45 @@ class FeedbackLoop:
         except Exception as e:
             logger.warning("加载DB最新权重失败，退回config静态权重作为基准: %s", e)
 
-        # 1) 时序衰减归因统计 + 连续失败检测
+        # 1)+2) 时序衰减归因统计 + 连续失败检测 + 惩罚调权
+        changes = self._penalty_adjustments(all_attr, base_weights, today)
+        # 3) IC优化调权
+        changes.extend(self._ic_adjustments(base_weights, today))
+
+        # 4) 归一化（仅更新内存中的 config 对象，不写回 config.yaml）
+        # 规则 §6：config.yaml 是静态先验，不被反馈循环改写。
+        # 调权结果已在第 2、3 步通过 save_weight_update 落库到 weight_history 表。
+        # scorer 次日启动时通过 db.get_latest_weights() 从库读取最新权重，
+        # 叠加到 config.yaml 静态权重上生效，无需覆盖写回 config.yaml。
+        if changes:
+            # 归一化 changes（保证被调因子的权重之和不变）
+            try:
+                if self.config:
+                    weights_dict = self.config.setdefault("weights", {})
+                    for ch in changes:
+                        weights_dict[ch["factor"]] = ch["new_weight"]
+                    # 归一化确保所有权重之和 = 1
+                    total = sum(weights_dict.values()) or 1
+                    if abs(total - 1.0) > 0.01:
+                        for k in weights_dict:
+                            weights_dict[k] = round(max(weights_dict[k] / total, 0.001), 4)
+            except Exception as e:
+                logger.warning("内存权重归一化失败: %s", e)
+
+        return changes
+
+    def _penalty_adjustments(self, all_attr: List[Dict],
+                             base_weights: Dict, today: str) -> List[Dict]:
+        """时序衰减归因统计 + 连续失败检测 + 失败率惩罚调权(全局 factor-level)。"""
+        from collections import defaultdict
+        today_dt = datetime.strptime(today, "%Y-%m-%d")
+        changes = []
+
         factor_stats = {}
         factor_daily = defaultdict(list)
         for record in all_attr:
-            try:
-                rec_date = datetime.strptime(record["trade_date"], "%Y-%m-%d")
-                days_ago = (today_dt - rec_date).days
-            except Exception:
-                days_ago = 999
-            if days_ago <= 5:
-                decay = 1.0
-            elif days_ago <= 15:
-                decay = 0.7
-            elif days_ago <= 30:
-                decay = 0.4
-            else:
-                decay = 0.2
+            days_ago = days_ago_of(record.get("trade_date", ""), today_dt)
+            decay = recency_decay(days_ago)
 
             factor_results = record.get("factor_results", {})
             for factor, result in factor_results.items():
@@ -439,7 +462,6 @@ class FeedbackLoop:
             if count >= 3:
                 consecutive_failures[factor] = count
 
-        # 2) 时序衰减惩罚调权
         for factor, stats in factor_stats.items():
             if stats["total_weight"] < MIN_ATTRIBUTION_SAMPLES:
                 continue
@@ -469,8 +491,14 @@ class FeedbackLoop:
                     today, factor, current_weight, new_weight,
                     reason=changes[-1]["reason"],
                 )
+        return changes
 
-        # 3) IC优化调权：基于近期IC重新分配权重（24 维 sub_*，与 config.yaml.weights 一一对应）
+    def _ic_adjustments(self, base_weights: Dict, today: str) -> List[Dict]:
+        """IC优化调权：基于近期IC重新分配权重（24 维 sub_*，与 config.yaml.weights 一一对应）。
+
+        失败不应中断归因惩罚调权的结果，但必须留痕便于排查。
+        """
+        changes = []
         try:
             from src.engine.ml_selector import FactorOptimizer
             optimizer = FactorOptimizer()
@@ -494,29 +522,7 @@ class FeedbackLoop:
                                 reason=changes[-1]["reason"],
                             )
         except Exception as e:
-            # IC优化调权失败不应中断归因惩罚调权的结果，但必须留痕便于排查
             logger.warning("IC优化调权失败(跳过该步骤): %s", e)
-
-        # 4) 归一化（仅更新内存中的 config 对象，不写回 config.yaml）
-        # 规则 §6：config.yaml 是静态先验，不被反馈循环改写。
-        # 调权结果已在第 2、3 步通过 save_weight_update 落库到 weight_history 表。
-        # scorer 次日启动时通过 db.get_latest_weights() 从库读取最新权重，
-        # 叠加到 config.yaml 静态权重上生效，无需覆盖写回 config.yaml。
-        if changes:
-            # 归一化 changes（保证被调因子的权重之和不变）
-            try:
-                if self.config:
-                    weights_dict = self.config.setdefault("weights", {})
-                    for ch in changes:
-                        weights_dict[ch["factor"]] = ch["new_weight"]
-                    # 归一化确保所有权重之和 = 1
-                    total = sum(weights_dict.values()) or 1
-                    if abs(total - 1.0) > 0.01:
-                        for k in weights_dict:
-                            weights_dict[k] = round(max(weights_dict[k] / total, 0.001), 4)
-            except Exception as e:
-                logger.warning("内存权重归一化失败: %s", e)
-
         return changes
 
     def _adjust_stock_weights(self, today: str) -> Dict[str, List[Dict]]:
@@ -562,8 +568,8 @@ class FeedbackLoop:
                 today_date = datetime.strptime(today, "%Y-%m-%d")
                 if (today_date - last_date).days < RETRAIN_INTERVAL_DAYS:
                     return None
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[feedback_loop.py:565] FeedbackLoop/_maybe_retrain_model 失败(忽略): %s", e)
 
         selector = MLStockSelector()
         factor_data = self._build_ic_dataset(days=90, today=today)
@@ -605,3 +611,32 @@ class FeedbackLoop:
             model_path=metrics.get("model_saved", ""),
         )
         return metrics
+
+
+# ======================================================================
+# 归因时序衰减(全局唯一口径, feedback_loop 与 stock_weight_manager 共用)
+# ======================================================================
+def recency_decay(days_ago: float) -> float:
+    """归因记录时序衰减系数。
+
+    档位: days_ago <=5 → 1.0, <=15 → 0.7, <=30 → 0.4, 其他 → 0.2。
+    原两处内联实现合并于此(2026-08 技术债偿还), 修改档位须同步评审
+    stock_weight_manager.adjust_weights 的行为一致性。
+    """
+    if days_ago <= 5:
+        return 1.0
+    if days_ago <= 15:
+        return 0.7
+    if days_ago <= 30:
+        return 0.4
+    return 0.2
+
+
+def days_ago_of(date_str: str, today_dt) -> int:
+    """解析 YYYY-MM-DD 并计算距 today_dt 的天数；解析失败返回 999(视为久远)。"""
+    try:
+        rec_date = datetime.strptime(date_str or "", "%Y-%m-%d")
+        return (today_dt - rec_date).days
+    except (ValueError, TypeError) as e:
+        logger.warning("捕获异常已忽略(src/engine/feedback_loop.py:635): %s", e)
+        return 999

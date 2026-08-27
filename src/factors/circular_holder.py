@@ -26,7 +26,8 @@ class CirculateHolderFactor:
             if os.path.exists(self._cache_file):
                 with open(self._cache_file, "r", encoding="utf-8") as f:
                     self._cache = json.load(f)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"加载缓存失败: {e}")
             self._cache = {}
 
     def _save_cache(self):
@@ -34,8 +35,8 @@ class CirculateHolderFactor:
             os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
             with open(self._cache_file, "w", encoding="utf-8") as f:
                 json.dump(self._cache, f, ensure_ascii=False, default=str)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[circular_holder.py:37] CirculateHolderFactor/_save_cache 失败(忽略): %s", e)
 
     def analyze(self, stock_code: str) -> Dict:
         result = {

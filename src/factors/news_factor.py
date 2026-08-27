@@ -9,6 +9,9 @@ import math
 import re
 from datetime import datetime
 from typing import List, Dict
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # 否定前缀词：如果关键词前出现这些词，则视为否定（不命中）
@@ -168,7 +171,8 @@ class NewsFactor:
         if isinstance(t, str):
             try:
                 t = datetime.strptime(t[:19], "%Y-%m-%d %H:%M:%S")
-            except Exception:
+            except Exception as e:
+                logger.warning(f"解析新闻时间失败: {e}")
                 return 0.5
         if not isinstance(t, datetime):
             return 0.5

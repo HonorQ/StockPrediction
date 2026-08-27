@@ -4,6 +4,7 @@
 检测国家队（汇金/证金/社保）的可能持仓和操作迹象
 基于价格稳定性和异常量能分析
 """
+import logging
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional
@@ -135,6 +136,7 @@ class NationalTeamFactor:
             }
 
         except Exception as e:
+            logging.warning("捕获异常已忽略(src/factors/national_team.py:137): %s", e)
             return {
                 "national_team_score": 0.0,
                 "national_team_holding": False,

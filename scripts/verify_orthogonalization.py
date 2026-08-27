@@ -2,6 +2,7 @@
 正交化审查脚本 — 验证 scorer.py 中 4 对正交化的实际效果
 用法: python scripts/verify_orthogonalization.py [--days 60]
 """
+import logging
 import os, sys, json, argparse
 import pandas as pd
 
@@ -38,7 +39,8 @@ def load_sub_scores(db, days=60):
         seen.add(key)
         try:
             subs = json.loads(r["sub_scores"]) if isinstance(r["sub_scores"], str) else r["sub_scores"]
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as e:
+            logging.warning("捕获异常已忽略(scripts/verify_orthogonalization.py:41): %s", e)
             continue
         if not isinstance(subs, dict):
             continue

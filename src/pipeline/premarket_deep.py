@@ -24,68 +24,12 @@ from src.pipeline.common import _pack
 
 
 def _pm_screen(ctx):
-    """硬性条件筛选: ST/停牌/板块排除"""
-    (
-        QS_CHANGE_CAP, QS_CHANGE_W, QS_HOT, QS_MV_SWEET, QS_NEWS_CAP,
-        QS_TURNOVER2, QS_TURNOVER5, QS_VOLUME_RATIO, _, a_stock_df,
-        all_factors, ashare, ashare_factors, atr_series, atr_stop,
-        before, c, cand, candidates_df, cap_behavior,
-        capital_behavior_factor, change_pct, chip, chip_calc, circulate,
-        circulate_factor, code_k, current_atr, current_price, db,
-        deep_research_factor, dr, dragon_tiger, elapsed_prefetch, event_pricing,
-        exclude_boards, expectation, expectation_penalty, expectation_pricing, ff,
-        filter_cfg, flow_cache, flow_continuity, flow_data, fundamental_factor,
-        h_k, history, history_cache, holder, holder_factor,
-        hot_codes, hot_df, hot_money, hot_money_tracker, idx,
-        in_hot, inf, institutional_factor, institutional_research, leader,
-        lh, limit_quality, limit_quality_factor, linkage, lockup,
-        lockup_factor, margin, margin_factor, market_fetcher, market_history,
-        mf, money_factor, money_fetcher, money_flow_continuity, mv_yi,
-        n, national_team, national_team_factor, news_event_analyzer, news_factor,
-        news_list, next_day, next_day_predictor, ns, ok_count,
-        oversold_strategy, pf, phase2_start, policy_event_factor, policy_result,
-        popularity_data, popularity_factor, pos_info, position_manager, prefetch_codes,
-        prefetch_start, profit_taking, profit_taking_detector, qs, qs_cfg,
-        quant_detector, quant_result, quick_scored, rebound_result, rebound_sustainability,
-        regime, relative_strength, research, rotation_data, row,
-        rs, saved_rows, saved_stocks, scored_stocks, scorer,
-        screener, sector_leader, sector_linkage, sector_rotation, sentiment,
-        sentiment_analysis, sentiment_cycle, sentiment_factor, sf, shareholder,
-        shareholder_factor, stock_cfg, stock_code, stock_data, stock_name,
-        stock_news_score, stop_info, strategies, sub_scores, sustainability,
-        take_info, tech_cfg, tech_factors, top_candidates, top_n,
-        total_mv, trade_cfg, turnover, v, volume_ratio,
-    ) = ctx.unpack(
-        'QS_CHANGE_CAP', 'QS_CHANGE_W', 'QS_HOT', 'QS_MV_SWEET', 'QS_NEWS_CAP',
-        'QS_TURNOVER2', 'QS_TURNOVER5', 'QS_VOLUME_RATIO', '_', 'a_stock_df',
-        'all_factors', 'ashare', 'ashare_factors', 'atr_series', 'atr_stop',
-        'before', 'c', 'cand', 'candidates_df', 'cap_behavior',
-        'capital_behavior_factor', 'change_pct', 'chip', 'chip_calc', 'circulate',
-        'circulate_factor', 'code_k', 'current_atr', 'current_price', 'db',
-        'deep_research_factor', 'dr', 'dragon_tiger', 'elapsed_prefetch', 'event_pricing',
-        'exclude_boards', 'expectation', 'expectation_penalty', 'expectation_pricing', 'ff',
-        'filter_cfg', 'flow_cache', 'flow_continuity', 'flow_data', 'fundamental_factor',
-        'h_k', 'history', 'history_cache', 'holder', 'holder_factor',
-        'hot_codes', 'hot_df', 'hot_money', 'hot_money_tracker', 'idx',
-        'in_hot', 'inf', 'institutional_factor', 'institutional_research', 'leader',
-        'lh', 'limit_quality', 'limit_quality_factor', 'linkage', 'lockup',
-        'lockup_factor', 'margin', 'margin_factor', 'market_fetcher', 'market_history',
-        'mf', 'money_factor', 'money_fetcher', 'money_flow_continuity', 'mv_yi',
-        'n', 'national_team', 'national_team_factor', 'news_event_analyzer', 'news_factor',
-        'news_list', 'next_day', 'next_day_predictor', 'ns', 'ok_count',
-        'oversold_strategy', 'pf', 'phase2_start', 'policy_event_factor', 'policy_result',
-        'popularity_data', 'popularity_factor', 'pos_info', 'position_manager', 'prefetch_codes',
-        'prefetch_start', 'profit_taking', 'profit_taking_detector', 'qs', 'qs_cfg',
-        'quant_detector', 'quant_result', 'quick_scored', 'rebound_result', 'rebound_sustainability',
-        'regime', 'relative_strength', 'research', 'rotation_data', 'row',
-        'rs', 'saved_rows', 'saved_stocks', 'scored_stocks', 'scorer',
-        'screener', 'sector_leader', 'sector_linkage', 'sector_rotation', 'sentiment',
-        'sentiment_analysis', 'sentiment_cycle', 'sentiment_factor', 'sf', 'shareholder',
-        'shareholder_factor', 'stock_cfg', 'stock_code', 'stock_data', 'stock_name',
-        'stock_news_score', 'stop_info', 'strategies', 'sub_scores', 'sustainability',
-        'take_info', 'tech_cfg', 'tech_factors', 'top_candidates', 'top_n',
-        'total_mv', 'trade_cfg', 'turnover', 'v', 'volume_ratio',
-    )
+    """硬性条件筛选: ST/停牌/板块排除。
+
+    显式依赖注入(AGENTS.md 二节): 只 unpack 本阶段实际需要的键,
+    其余上下文经 ctx 对后续阶段可见, 不做全量往返。
+    """
+    screener, a_stock_df = ctx.unpack('screener', 'a_stock_df')
     config = ctx["config"]
 
     print("\n[6/6] 筛选股票并计算因子...")
@@ -109,80 +53,31 @@ def _pm_screen(ctx):
     ctx['config'] = config
 
 def _pm_quick_topn(ctx):
-    """实时快评 → TopN候选(regime动态) + 并行K线预取"""
-    (
-        QS_CHANGE_CAP, QS_CHANGE_W, QS_HOT, QS_MV_SWEET, QS_NEWS_CAP,
-        QS_TURNOVER2, QS_TURNOVER5, QS_VOLUME_RATIO, _, a_stock_df,
-        all_factors, ashare, ashare_factors, atr_series, atr_stop,
-        before, c, cand, candidates_df, cap_behavior,
-        capital_behavior_factor, change_pct, chip, chip_calc, circulate,
-        circulate_factor, code_k, current_atr, current_price, db,
-        deep_research_factor, dr, dragon_tiger, elapsed_prefetch, event_pricing,
-        exclude_boards, expectation, expectation_penalty, expectation_pricing, ff,
-        filter_cfg, flow_cache, flow_continuity, flow_data, fundamental_factor,
-        h_k, history, history_cache, holder, holder_factor,
-        hot_codes, hot_df, hot_money, hot_money_tracker, idx,
-        in_hot, inf, institutional_factor, institutional_research, leader,
-        lh, limit_quality, limit_quality_factor, linkage, lockup,
-        lockup_factor, margin, margin_factor, market_fetcher, market_history,
-        mf, money_factor, money_fetcher, money_flow_continuity, mv_yi,
-        n, national_team, national_team_factor, news_event_analyzer, news_factor,
-        news_list, next_day, next_day_predictor, ns, ok_count,
-        oversold_strategy, pf, phase2_start, policy_event_factor, policy_result,
-        popularity_data, popularity_factor, pos_info, position_manager, prefetch_codes,
-        prefetch_start, profit_taking, profit_taking_detector, qs, qs_cfg,
-        quant_detector, quant_result, quick_scored, rebound_result, rebound_sustainability,
-        regime, relative_strength, research, rotation_data, row,
-        rs, saved_rows, saved_stocks, scored_stocks, scorer,
-        screener, sector_leader, sector_linkage, sector_rotation, sentiment,
-        sentiment_analysis, sentiment_cycle, sentiment_factor, sf, shareholder,
-        shareholder_factor, stock_cfg, stock_code, stock_data, stock_name,
-        stock_news_score, stop_info, strategies, sub_scores, sustainability,
-        take_info, tech_cfg, tech_factors, top_candidates, top_n,
-        total_mv, trade_cfg, turnover, v, volume_ratio,
-    ) = ctx.unpack(
-        'QS_CHANGE_CAP', 'QS_CHANGE_W', 'QS_HOT', 'QS_MV_SWEET', 'QS_NEWS_CAP',
-        'QS_TURNOVER2', 'QS_TURNOVER5', 'QS_VOLUME_RATIO', '_', 'a_stock_df',
-        'all_factors', 'ashare', 'ashare_factors', 'atr_series', 'atr_stop',
-        'before', 'c', 'cand', 'candidates_df', 'cap_behavior',
-        'capital_behavior_factor', 'change_pct', 'chip', 'chip_calc', 'circulate',
-        'circulate_factor', 'code_k', 'current_atr', 'current_price', 'db',
-        'deep_research_factor', 'dr', 'dragon_tiger', 'elapsed_prefetch', 'event_pricing',
-        'exclude_boards', 'expectation', 'expectation_penalty', 'expectation_pricing', 'ff',
-        'filter_cfg', 'flow_cache', 'flow_continuity', 'flow_data', 'fundamental_factor',
-        'h_k', 'history', 'history_cache', 'holder', 'holder_factor',
-        'hot_codes', 'hot_df', 'hot_money', 'hot_money_tracker', 'idx',
-        'in_hot', 'inf', 'institutional_factor', 'institutional_research', 'leader',
-        'lh', 'limit_quality', 'limit_quality_factor', 'linkage', 'lockup',
-        'lockup_factor', 'margin', 'margin_factor', 'market_fetcher', 'market_history',
-        'mf', 'money_factor', 'money_fetcher', 'money_flow_continuity', 'mv_yi',
-        'n', 'national_team', 'national_team_factor', 'news_event_analyzer', 'news_factor',
-        'news_list', 'next_day', 'next_day_predictor', 'ns', 'ok_count',
-        'oversold_strategy', 'pf', 'phase2_start', 'policy_event_factor', 'policy_result',
-        'popularity_data', 'popularity_factor', 'pos_info', 'position_manager', 'prefetch_codes',
-        'prefetch_start', 'profit_taking', 'profit_taking_detector', 'qs', 'qs_cfg',
-        'quant_detector', 'quant_result', 'quick_scored', 'rebound_result', 'rebound_sustainability',
-        'regime', 'relative_strength', 'research', 'rotation_data', 'row',
-        'rs', 'saved_rows', 'saved_stocks', 'scored_stocks', 'scorer',
-        'screener', 'sector_leader', 'sector_linkage', 'sector_rotation', 'sentiment',
-        'sentiment_analysis', 'sentiment_cycle', 'sentiment_factor', 'sf', 'shareholder',
-        'shareholder_factor', 'stock_cfg', 'stock_code', 'stock_data', 'stock_name',
-        'stock_news_score', 'stop_info', 'strategies', 'sub_scores', 'sustainability',
-        'take_info', 'tech_cfg', 'tech_factors', 'top_candidates', 'top_n',
-        'total_mv', 'trade_cfg', 'turnover', 'v', 'volume_ratio',
+    """实时快评 → TopN候选(regime动态) + 并行K线预取。
+
+    显式依赖注入: 本阶段只需快评输入(candidates_df/hot_codes/news)与 regime 配置。
+    """
+    candidates_df, filter_cfg, hot_codes, news_factor, news_list, regime = ctx.unpack(
+        'candidates_df', 'filter_cfg', 'hot_codes', 'news_factor', 'news_list', 'regime',
     )
     config = ctx["config"]
 
     print("  --- 阶段1: 实时行情快速预评分 ---")
     qs_cfg = filter_cfg.get("quick_score", {}) or {}
-    QS_CHANGE_W = float(qs_cfg.get("change_weight", 3))
-    QS_CHANGE_CAP = float(qs_cfg.get("change_cap", 20))
-    QS_TURNOVER2 = float(qs_cfg.get("turnover2_bonus", 10))
-    QS_TURNOVER5 = float(qs_cfg.get("turnover5_bonus", 5))
-    QS_VOLUME_RATIO = float(qs_cfg.get("volume_ratio_bonus", 10))
-    QS_HOT = float(qs_cfg.get("hot_bonus", 15))
-    QS_MV_SWEET = float(qs_cfg.get("mv_sweet_bonus", 5))
-    QS_NEWS_CAP = float(qs_cfg.get("news_bonus_cap", 10))
+    # QS 快评参数: 从 config 读取(默认值与历史硬编码一致)
+    _QSD = {k: float(qs_cfg.get(k, d)) for k, d in [
+        ("change_weight", 3), ("change_cap", 20),
+        ("turnover2_bonus", 10), ("turnover5_bonus", 5),
+        ("volume_ratio_bonus", 10), ("hot_bonus", 15),
+        ("mv_sweet_bonus", 5), ("news_bonus_cap", 10)]}
+    QS_CHANGE_W = _QSD["change_weight"]
+    QS_CHANGE_CAP = _QSD["change_cap"]
+    QS_TURNOVER2 = _QSD["turnover2_bonus"]
+    QS_TURNOVER5 = _QSD["turnover5_bonus"]
+    QS_VOLUME_RATIO = _QSD["volume_ratio_bonus"]
+    QS_HOT = _QSD["hot_bonus"]
+    QS_MV_SWEET = _QSD["mv_sweet_bonus"]
+    QS_NEWS_CAP = _QSD["news_bonus_cap"]
 
     if regime == "bull":
         top_n = int(qs_cfg.get("top_n_bull", 50))
@@ -237,22 +132,13 @@ def _pm_quick_topn(ctx):
 def _calc_one_stock(ctx, idx, cand):
     """单票深度因子计算(自 _pm_deep_loop 大循环机械提取)。
 
-    组件与上下文经 ctx 注入; 结果 append 到 scored_stocks。
+    组件与上下文经 ctx 注入; 因子计算拆为五个块(见下方 _calc_*_block);
+    结果 append 到 scored_stocks。
     """
-    (ashare_factors, atr_stop, capital_behavior_factor, chip_calc, circulate_factor, deep_research_factor, dragon_tiger, expectation_pricing, flow_cache, fundamental_factor, history_cache, holder_factor, hot_codes, hot_df, hot_money_tracker, institutional_factor, institutional_research, limit_quality_factor, lockup_factor, margin_factor, market_fetcher, market_history, money_factor, money_fetcher, money_flow_continuity, national_team_factor, news_event_analyzer, news_factor, news_list, next_day_predictor, oversold_strategy, phase2_start, policy_event_factor, popularity_factor, position_manager, profit_taking_detector, quant_detector, rebound_sustainability, relative_strength, rotation_data, scored_stocks, scorer, sector_leader, sector_linkage, sector_rotation, sentiment, sentiment_cycle, sentiment_factor, shareholder_factor, tech_cfg, top_candidates, trade_cfg) = ctx.unpack(
-        'ashare_factors', 'atr_stop', 'capital_behavior_factor', 'chip_calc'
-        'circulate_factor', 'deep_research_factor', 'dragon_tiger', 'expectation_pricing'
-        'flow_cache', 'fundamental_factor', 'history_cache', 'holder_factor'
-        'hot_codes', 'hot_df', 'hot_money_tracker', 'institutional_factor'
-        'institutional_research', 'limit_quality_factor', 'lockup_factor', 'margin_factor'
-        'market_fetcher', 'market_history', 'money_factor', 'money_fetcher'
-        'money_flow_continuity', 'national_team_factor', 'news_event_analyzer', 'news_factor'
-        'news_list', 'next_day_predictor', 'oversold_strategy', 'phase2_start'
-        'policy_event_factor', 'popularity_factor', 'position_manager', 'profit_taking_detector'
-        'quant_detector', 'rebound_sustainability', 'relative_strength', 'rotation_data'
-        'scored_stocks', 'scorer', 'sector_leader', 'sector_linkage'
-        'sector_rotation', 'sentiment', 'sentiment_cycle', 'sentiment_factor'
-        'shareholder_factor', 'tech_cfg', 'top_candidates', 'trade_cfg'
+    (history_cache, market_fetcher, phase2_start, scored_stocks,
+     top_candidates) = ctx.unpack(
+        'history_cache', 'market_fetcher', 'phase2_start', 'scored_stocks',
+        'top_candidates',
     )
 
     if (datetime.now() - phase2_start).total_seconds() > 480:
@@ -271,8 +157,31 @@ def _calc_one_stock(ctx, idx, cand):
         print("      ⚠️ 历史数据不足，跳过")
         return "skip"
 
+    all_factors = {}
+    _calc_tech_block(ctx, cand, history, all_factors)
+    _calc_sustain_block(ctx, cand, history, all_factors)
+    _calc_sentiment_event_block(ctx, cand, history, all_factors)
+    _calc_policy_deep_block(ctx, cand, history, all_factors)
+    _calc_composite_block(ctx, cand, history, all_factors)
+    return None
+
+
+def _calc_tech_block(ctx, cand, history, all_factors):
+    """技术面块: 技术因子/资金流/新闻/情绪/策略/筹码/基本面/人气/机构/强弱/超跌/轮动。"""
+    (chip_calc, flow_cache, fundamental_factor, hot_codes, hot_df,
+     institutional_factor, money_factor, money_fetcher, news_factor, news_list,
+     popularity_factor, relative_strength, market_history, oversold_strategy,
+     rotation_data, sector_rotation, sentiment, sentiment_factor, tech_cfg) = ctx.unpack(
+        'chip_calc', 'flow_cache', 'fundamental_factor', 'hot_codes', 'hot_df',
+        'institutional_factor', 'money_factor', 'money_fetcher', 'news_factor', 'news_list',
+        'popularity_factor', 'relative_strength', 'market_history', 'oversold_strategy',
+        'rotation_data', 'sector_rotation', 'sentiment', 'sentiment_factor', 'tech_cfg',
+    )
+    stock_code = cand["code"]
+    current_price = cand["current_price"]
+
     tech_factors = TechnicalFactors(history, tech_cfg)
-    all_factors = tech_factors.calculate_all()
+    all_factors.update(tech_factors.calculate_all())
 
     flow_data = flow_cache.get(stock_code)
     if flow_data is None:
@@ -300,7 +209,7 @@ def _calc_one_stock(ctx, idx, cand):
     all_factors["chip_above_peak"] = chip.get("price_above_peak", 50)
     all_factors["close_price"] = current_price
 
-    stock_data = row.to_dict()
+    stock_data = cand["row"].to_dict()
     ff = fundamental_factor.calculate_all(stock_data)
     all_factors.update(ff)
 
@@ -329,6 +238,17 @@ def _calc_one_stock(ctx, idx, cand):
     all_factors["tech_sector_strength"] = rotation_data.get("tech_strength", 50)
     all_factors["rotation_signal"] = rotation_data.get("rotation_signal", "neutral")
 
+
+def _calc_sustain_block(ctx, cand, history, all_factors):
+    """反弹持续性与预判块: 持续性/次日预判/预期透支/利好兑现/获利出逃。"""
+    (expectation_pricing, news_event_analyzer, news_list, next_day_predictor,
+     profit_taking_detector, rebound_sustainability, rotation_data) = ctx.unpack(
+        'expectation_pricing', 'news_event_analyzer', 'news_list', 'next_day_predictor',
+        'profit_taking_detector', 'rebound_sustainability', 'rotation_data',
+    )
+    stock_code = cand["code"]
+    stock_name = cand["name"]
+
     sustainability = rebound_sustainability.analyze(history, rotation_data)
     all_factors["sustainability_score"] = sustainability["sustainability_score"]
     all_factors["rebound_type"] = sustainability["rebound_type"]
@@ -353,6 +273,22 @@ def _calc_one_stock(ctx, idx, cand):
     all_factors["profit_taking_detected"] = profit_taking["detected"]
     all_factors["profit_taking_intensity"] = profit_taking["intensity"]
     all_factors["profit_taking_signals"] = profit_taking["signals"]
+
+
+def _calc_sentiment_event_block(ctx, cand, history, all_factors):
+    """题材行为块: A股特色/游资/情绪周期/量化/两融/股东/涨跌停/板块联动/龙头/资金持续/调研/龙虎榜。"""
+    (ashare_factors, dragon_tiger, hot_money_tracker, institutional_research,
+     limit_quality_factor, lockup_factor, margin_factor,
+     money_flow_continuity, quant_detector, sector_leader, sector_linkage,
+     sentiment, sentiment_cycle, shareholder_factor) = ctx.unpack(
+        'ashare_factors', 'dragon_tiger', 'hot_money_tracker', 'institutional_research',
+        'limit_quality_factor', 'lockup_factor', 'margin_factor',
+        'money_flow_continuity', 'quant_detector', 'sector_leader', 'sector_linkage',
+        'sentiment', 'sentiment_cycle', 'shareholder_factor',
+    )
+    stock_code = cand["code"]
+    stock_name = cand["name"]
+    stock_data = cand["row"].to_dict()
 
     ashare = ashare_factors.calculate_all(history, sentiment, code=stock_code, name=stock_name)
     all_factors.update(ashare)
@@ -413,6 +349,18 @@ def _calc_one_stock(ctx, idx, cand):
     all_factors["institution_count"] = lh["institution_count"]
     all_factors["institution_buy_net"] = lh["institution_buy_net"]
 
+
+def _calc_policy_deep_block(ctx, cand, history, all_factors):
+    """政策与深度研究块: 深度研究/政策事件/资金行为模式/国家队。"""
+    (capital_behavior_factor, deep_research_factor, market_history, national_team_factor,
+     news_list, policy_event_factor, sentiment) = ctx.unpack(
+        'capital_behavior_factor', 'deep_research_factor', 'market_history',
+        'national_team_factor', 'news_list', 'policy_event_factor', 'sentiment',
+    )
+    stock_code = cand["code"]
+    stock_name = cand["name"]
+    stock_data = cand["row"].to_dict()
+
     dr = deep_research_factor.analyze(history, news_list, stock_code, stock_data)
     all_factors["deep_research_score"] = dr["deep_research_score"]
     all_factors["deep_research_signals"] = dr["deep_research_signals"]
@@ -456,6 +404,18 @@ def _calc_one_stock(ctx, idx, cand):
     all_factors["national_team_change"] = national_team["national_team_change"]
     all_factors["national_team_signals"] = national_team["national_team_signals"]
 
+
+def _calc_composite_block(ctx, cand, history, all_factors):
+    """合成评分块: ATR止损/股东人数/流通股东/护城河/子评分/结果落袋。"""
+    (atr_stop, circulate_factor, holder_factor, position_manager, scorer,
+     scored_stocks, trade_cfg) = ctx.unpack(
+        'atr_stop', 'circulate_factor', 'holder_factor', 'position_manager', 'scorer',
+        'scored_stocks', 'trade_cfg',
+    )
+    stock_code = cand["code"]
+    stock_name = cand["name"]
+    current_price = cand["current_price"]
+
     try:
         atr_series = atr_stop.calculate_atr(history)
         current_atr = atr_series.iloc[-1] if not atr_series.empty else 0
@@ -470,8 +430,8 @@ def _calc_one_stock(ctx, idx, cand):
             all_factors["dynamic_take_profit_pct"] = take_info["take_profit_pct"]
             all_factors["position_pct"] = pos_info["position_pct"]
             all_factors["position_shares"] = pos_info["shares"]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("ATR止损计算失败(code=%s): %s", stock_code, e)
 
     # 股东人数/筹码集中度因子
     holder = holder_factor.analyze(stock_code)
@@ -503,74 +463,23 @@ def _calc_one_stock(ctx, idx, cand):
         "strong_signals": 0,
     })
 
+
+
 def _pm_deep_loop(ctx):
-    """逐票深度因子计算 + 截面Z-Score归一化"""
-    (
-        QS_CHANGE_CAP, QS_CHANGE_W, QS_HOT, QS_MV_SWEET, QS_NEWS_CAP,
-        QS_TURNOVER2, QS_TURNOVER5, QS_VOLUME_RATIO, _, a_stock_df,
-        all_factors, ashare, ashare_factors, atr_series, atr_stop,
-        before, c, cand, candidates_df, cap_behavior,
-        capital_behavior_factor, change_pct, chip, chip_calc, circulate,
-        circulate_factor, code_k, current_atr, current_price, db,
-        deep_research_factor, dr, dragon_tiger, elapsed_prefetch, event_pricing,
-        exclude_boards, expectation, expectation_penalty, expectation_pricing, ff,
-        filter_cfg, flow_cache, flow_continuity, flow_data, fundamental_factor,
-        h_k, history, history_cache, holder, holder_factor,
-        hot_codes, hot_df, hot_money, hot_money_tracker, idx,
-        in_hot, inf, institutional_factor, institutional_research, leader,
-        lh, limit_quality, limit_quality_factor, linkage, lockup,
-        lockup_factor, margin, margin_factor, market_fetcher, market_history,
-        mf, money_factor, money_fetcher, money_flow_continuity, mv_yi,
-        n, national_team, national_team_factor, news_event_analyzer, news_factor,
-        news_list, next_day, next_day_predictor, ns, ok_count,
-        oversold_strategy, pf, phase2_start, policy_event_factor, policy_result,
-        popularity_data, popularity_factor, pos_info, position_manager, prefetch_codes,
-        prefetch_start, profit_taking, profit_taking_detector, qs, qs_cfg,
-        quant_detector, quant_result, quick_scored, rebound_result, rebound_sustainability,
-        regime, relative_strength, research, rotation_data, row,
-        rs, saved_rows, saved_stocks, scored_stocks, scorer,
-        screener, sector_leader, sector_linkage, sector_rotation, sentiment,
-        sentiment_analysis, sentiment_cycle, sentiment_factor, sf, shareholder,
-        shareholder_factor, stock_cfg, stock_code, stock_data, stock_name,
-        stock_news_score, stop_info, strategies, sub_scores, sustainability,
-        take_info, tech_cfg, tech_factors, top_candidates, top_n,
-        total_mv, trade_cfg, turnover, v, volume_ratio,
-    ) = ctx.unpack(
-        'QS_CHANGE_CAP', 'QS_CHANGE_W', 'QS_HOT', 'QS_MV_SWEET', 'QS_NEWS_CAP',
-        'QS_TURNOVER2', 'QS_TURNOVER5', 'QS_VOLUME_RATIO', '_', 'a_stock_df',
-        'all_factors', 'ashare', 'ashare_factors', 'atr_series', 'atr_stop',
-        'before', 'c', 'cand', 'candidates_df', 'cap_behavior',
-        'capital_behavior_factor', 'change_pct', 'chip', 'chip_calc', 'circulate',
-        'circulate_factor', 'code_k', 'current_atr', 'current_price', 'db',
-        'deep_research_factor', 'dr', 'dragon_tiger', 'elapsed_prefetch', 'event_pricing',
-        'exclude_boards', 'expectation', 'expectation_penalty', 'expectation_pricing', 'ff',
-        'filter_cfg', 'flow_cache', 'flow_continuity', 'flow_data', 'fundamental_factor',
-        'h_k', 'history', 'history_cache', 'holder', 'holder_factor',
-        'hot_codes', 'hot_df', 'hot_money', 'hot_money_tracker', 'idx',
-        'in_hot', 'inf', 'institutional_factor', 'institutional_research', 'leader',
-        'lh', 'limit_quality', 'limit_quality_factor', 'linkage', 'lockup',
-        'lockup_factor', 'margin', 'margin_factor', 'market_fetcher', 'market_history',
-        'mf', 'money_factor', 'money_fetcher', 'money_flow_continuity', 'mv_yi',
-        'n', 'national_team', 'national_team_factor', 'news_event_analyzer', 'news_factor',
-        'news_list', 'next_day', 'next_day_predictor', 'ns', 'ok_count',
-        'oversold_strategy', 'pf', 'phase2_start', 'policy_event_factor', 'policy_result',
-        'popularity_data', 'popularity_factor', 'pos_info', 'position_manager', 'prefetch_codes',
-        'prefetch_start', 'profit_taking', 'profit_taking_detector', 'qs', 'qs_cfg',
-        'quant_detector', 'quant_result', 'quick_scored', 'rebound_result', 'rebound_sustainability',
-        'regime', 'relative_strength', 'research', 'rotation_data', 'row',
-        'rs', 'saved_rows', 'saved_stocks', 'scored_stocks', 'scorer',
-        'screener', 'sector_leader', 'sector_linkage', 'sector_rotation', 'sentiment',
-        'sentiment_analysis', 'sentiment_cycle', 'sentiment_factor', 'sf', 'shareholder',
-        'shareholder_factor', 'stock_cfg', 'stock_code', 'stock_data', 'stock_name',
-        'stock_news_score', 'stop_info', 'strategies', 'sub_scores', 'sustainability',
-        'take_info', 'tech_cfg', 'tech_factors', 'top_candidates', 'top_n',
-        'total_mv', 'trade_cfg', 'turnover', 'v', 'volume_ratio',
+    """逐票深度因子计算 + 截面Z-Score归一化。
+
+    显式依赖注入: 本阶段只需候选列表/取数器/DB;
+    单票计算经 _calc_one_stock → _calc_*_block 各自按需 unpack。
+    """
+    db, market_fetcher, money_fetcher, top_candidates = ctx.unpack(
+        'db', 'market_fetcher', 'money_fetcher', 'top_candidates',
     )
     config = ctx["config"]
 
     print("  --- 阶段2: 深度因子计算 ---")
     scored_stocks = []
     phase2_start = datetime.now()
+    ctx["phase2_start"] = phase2_start
 
     # 并行预取历史K线 + 资金流（网络I/O并行，CPU计算保持串行）
     prefetch_codes = [c["code"] for c in top_candidates]
@@ -579,6 +488,9 @@ def _pm_deep_loop(ctx):
     history_cache, flow_cache = _prefetch_history_and_flow(
         market_fetcher, money_fetcher, prefetch_codes, days=120
     )
+    ctx["history_cache"] = history_cache
+    ctx["flow_cache"] = flow_cache
+    ctx["scored_stocks"] = scored_stocks
     elapsed_prefetch = (datetime.now() - prefetch_start).total_seconds()
     ok_count = sum(1 for v in history_cache.values() if v is not None and not v.empty)
     print(f"  ✅ 预取完成: 历史K线 {ok_count}/{len(prefetch_codes)} 只, 耗时 {elapsed_prefetch:.1f}s")
@@ -608,8 +520,8 @@ def _pm_deep_loop(ctx):
             # 指数K线一并落库，供离线 regime 判定/回测基准使用
             try:
                 db.save_klines("sh000300", market_history)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("沪深300指数K线落库失败(忽略): %s", e)
     except Exception as e:
         print(f"  ⚠️ 获取沪深300历史失败，relative_strength 将降级为个股自身强弱: {e}")
         market_history = None
@@ -623,7 +535,3 @@ def _pm_deep_loop(ctx):
     print(f"  共计算 {len(scored_stocks)} 只股票的因子")
     _pack(ctx, dict(locals()))
     ctx["config"] = config
-
-
-    _pack(ctx, dict(locals()))
-    ctx['config'] = config

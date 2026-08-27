@@ -302,23 +302,15 @@ def _prefetch_history_and_flow(market_fetcher, money_fetcher, codes: list, days:
             h = market_fetcher.get_stock_history(code, days=days)
 
 
-        except Exception:
-
-
+        except Exception as e:
+            logger.warning(f"获取K线失败 {code}: {e}")
             h = None
 
-
         try:
-
-
             f = money_fetcher.get_stock_fund_flow(code)
-
-
-        except Exception:
-
-
+        except Exception as e:
+            logger.warning(f"获取资金流失败 {code}: {e}")
             f = None
-
 
         return code, h, f
 
@@ -342,20 +334,11 @@ def _prefetch_history_and_flow(market_fetcher, money_fetcher, codes: list, days:
 
 
             try:
-
-
                 code, h, f = fut.result()
-
-
                 history_cache[code] = h
-
-
                 flow_cache[code] = f
-
-
-            except Exception:
-
-
+            except Exception as e:
+                logger.warning(f"并发获取失败: {e}")
                 continue
 
 
@@ -430,19 +413,15 @@ def _prefetch_history_and_flow(market_fetcher, money_fetcher, codes: list, days:
     def _fetch_one(code: str):
 
         try:
-
             h = market_fetcher.get_stock_history(code, days=days)
-
-        except Exception:
-
+        except Exception as e:
+            logger.warning(f"获取K线失败 {code}: {e}")
             h = None
 
         try:
-
             f = money_fetcher.get_stock_fund_flow(code)
-
-        except Exception:
-
+        except Exception as e:
+            logger.warning(f"获取资金流失败 {code}: {e}")
             f = None
 
         return code, h, f
@@ -458,17 +437,12 @@ def _prefetch_history_and_flow(market_fetcher, money_fetcher, codes: list, days:
         futures = [ex.submit(_fetch_one, c) for c in codes]
 
         for fut in _cf.as_completed(futures):
-
             try:
-
                 code, h, f = fut.result()
-
                 history_cache[code] = h
-
                 flow_cache[code] = f
-
-            except Exception:
-
+            except Exception as e:
+                logger.warning(f"并发获取失败: {e}")
                 continue
 
 
@@ -571,9 +545,10 @@ def _cleanup_cache(days: int = 7):
 
                     shutil.rmtree(fpath, ignore_errors=True)
 
-        except Exception:
+        except OSError as e:
+            logger.warning("捕获异常已忽略(src/pipeline/common.py:548): %s", e)
 
-            pass
+            pass  # 缓存文件已被并发清理等, 属预期
 
 
 

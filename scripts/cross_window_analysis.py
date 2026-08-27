@@ -4,6 +4,7 @@
 从各窗口K线缓存回填 backtest 模式推荐的 T+N 收益，
 输出 bear/bull/neutral 三窗口的超额收益对比。
 """
+import logging
 import os
 import sys
 import pickle
@@ -43,7 +44,8 @@ def to_float(v, default=0.0):
         return default
     try:
         return float(v)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logging.warning("捕获异常已忽略(scripts/cross_window_analysis.py:46): %s", e)
         return default
 
 

@@ -18,6 +18,7 @@ Regime 分层归因分析（ML_TRAINING_PLAN.md 阶段 2）。
 输出：reports/regime_factor_attribution.md
 参考：ML_TRAINING_PLAN.md §4 阶段 2；AttributionAggregator。
 """
+import logging
 import os
 import sqlite3
 import sys
@@ -124,7 +125,8 @@ def compute_regime_ts(trade_date: str, market_fetcher) -> str:
         if bull >= 2 or score >= 65:
             return "bull"
         return "neutral"
-    except Exception:
+    except Exception as e:
+        logging.warning("捕获异常已忽略(evaluate_recs.py:127): %s", e)
         return "neutral"
 
 

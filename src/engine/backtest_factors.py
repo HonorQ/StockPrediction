@@ -18,6 +18,7 @@ K 线可重建因子计算器 — 反馈训练专用
 输出：
   {factor_name: sub_score (0-100)} — 与 StockScorer.get_sub_scores 完全一致
 """
+import logging
 import os
 import sys
 from typing import Dict, List
@@ -37,6 +38,8 @@ from src.factors.capital_behavior import CapitalBehaviorFactor
 from src.factors.deep_research import DeepResearchFactor
 from src.factors.sector_rotation import OversoldReboundStrategy
 from src.engine.scorer import StockScorer
+
+logger = logging.getLogger(__name__)
 
 
 # 24 维因子完整列表（与 StockScorer.get_sub_scores 完全一致，
@@ -80,7 +83,8 @@ def baostock_rows_to_dataframe(kline_rows: List[List]) -> pd.DataFrame:
             vol = float(vol_str) if vol_str else 0.0
             turn = float(turn_str) if turn_str else 0.0
             pct = float(pct_str) if pct_str else 0.0
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.warning("捕获异常已忽略(src/engine/backtest_factors.py:86): %s", e)
             continue
 
         if close <= 0:
@@ -150,15 +154,16 @@ def calc_factors_from_kline(kline_rows: List[List], market_df: pd.DataFrame = No
     try:
         tech = TechnicalFactors(df, tech_cfg)
         factors.update(tech.calculate_all())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("TechnicalFactors 因子计算失败(按中性处理): %s", e)
 
     # 2. K 线形态策略（strategy 的输入）
     try:
         strategies = StockStrategies.get_triggered_strategies(df)
         factors["strategies_triggered"] = strategies
         factors["strategy_count"] = len(strategies)
-    except Exception:
+    except Exception as e:
+        logger.warning("StockStrategies 因子计算失败(按中性处理): %s", e)
         factors["strategies_triggered"] = []
         factors["strategy_count"] = 0
 
@@ -168,24 +173,24 @@ def calc_factors_from_kline(kline_rows: List[List], market_df: pd.DataFrame = No
         chip_result = chip_calc.calculate(df)
         factors.update(chip_result)
         factors["chip_score"] = chip_calc.get_chip_score(df)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("ChipDistribution 因子计算失败(按中性处理): %s", e)
 
     # 4. 相对强弱（relative_strength 的输入；传入 market_df 时含相对大盘部分）
     try:
         rs = RelativeStrength()
         rs_result = rs.calculate_all(df, market_df=market_df)
         factors.update(rs_result)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("RelativeStrength 因子计算失败(按中性处理): %s", e)
 
     # 5. A股特色因子（ashare_specific 的输入）
     try:
         ashare = AShareCharacteristics()
         ashare_result = ashare.calculate_all(df, market_sentiment={})
         factors.update(ashare_result)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("AShareCharacteristics 因子计算失败(按中性处理): %s", e)
 
     # 6. 量化行为检测（quant_behavior 的输入）
     try:
@@ -195,7 +200,8 @@ def calc_factors_from_kline(kline_rows: List[List], market_df: pd.DataFrame = No
         factors["quant_score"] = quant_result.get("quant_score", 50)
         factors["quant_signals"] = quant_result.get("quant_signals", [])
         factors["quant_risk"] = quant_result.get("quant_risk", "low")
-    except Exception:
+    except Exception as e:
+        logger.warning("QuantBehaviorDetector 因子计算失败(按中性处理): %s", e)
         factors["quant_detected"] = False
         factors["quant_score"] = 50
         factors["quant_signals"] = []
@@ -209,7 +215,8 @@ def calc_factors_from_kline(kline_rows: List[List], market_df: pd.DataFrame = No
         factors["capital_behavior_confidence"] = cap_result.get("capital_behavior_confidence", 0)
         factors["capital_behavior_signals"] = cap_result.get("capital_behavior_signals", [])
         factors["flow_continuity"] = cap_result.get("flow_continuity", "neutral")
-    except Exception:
+    except Exception as e:
+        logger.warning("CapitalBehaviorFactor 因子计算失败(按中性处理): %s", e)
         factors["capital_behavior"] = "normal"
         factors["capital_behavior_confidence"] = 0
         factors["flow_continuity"] = "neutral"
@@ -220,7 +227,8 @@ def calc_factors_from_kline(kline_rows: List[List], market_df: pd.DataFrame = No
         dr_result = dr.analyze(df, news_list=[], stock_code=None, stock_data=None)
         factors["deep_research_score"] = dr_result.get("deep_research_score", 50)
         # 其他 deep_research 字段不写入 sub_scores，但保留用于上下文
-    except Exception:
+    except Exception as e:
+        logger.warning("DeepResearchFactor 因子计算失败(按中性处理): %s", e)
         factors["deep_research_score"] = 50
 
     # 9. 超跌反弹（oversold_rebound 的输入）
@@ -230,7 +238,8 @@ def calc_factors_from_kline(kline_rows: List[List], market_df: pd.DataFrame = No
         factors["oversold_rebound_detected"] = rebound_result.get("detected", False)
         factors["oversold_rebound_score"] = rebound_result.get("score", 0)
         factors["oversold_rebound_signals"] = rebound_result.get("signals", [])
-    except Exception:
+    except Exception as e:
+        logger.warning("OversoldReboundStrategy 因子计算失败(按中性处理): %s", e)
         factors["oversold_rebound_detected"] = False
         factors["oversold_rebound_score"] = 0
         factors["oversold_rebound_signals"] = []

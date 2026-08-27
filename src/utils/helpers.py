@@ -108,3 +108,36 @@ def format_number(value, decimals: int = 2) -> str:
     elif abs(value) >= 1e4:
         return f"{value / 1e4:.{decimals}f}万"
     return f"{value:.{decimals}f}"
+
+
+# ======================================================================
+# 分级阈值加载器(全项目统一口径, config.yaml score_tiers 段)
+# ======================================================================
+_DEFAULT_SCORE_TIERS = {
+    "strong_signal": 70,
+    "sentiment_ice": 30, "sentiment_low": 45,
+    "sentiment_warm": 60, "sentiment_hot": 75,
+    "factor_bullish": 60, "factor_bearish": 40,
+    "ml_bullish": 0.65, "ml_slightly_bullish": 0.55,
+    "ml_slightly_bearish": 0.45, "ml_bearish": 0.35,
+    "moat_strong": 70, "moat_medium": 55,
+    "rebound_bullish": 70, "rebound_slightly_bullish": 55,
+    "rebound_slightly_bearish": 45, "rebound_bearish": 30,
+    "hot_warm": 70, "hot_cool": 50,
+}
+
+
+def load_score_tiers(config: dict = None) -> dict:
+    """从 config.yaml 的 score_tiers 段加载分级阈值，缺失项用默认值兜底。
+
+    用法::
+
+        from src.utils.helpers import load_score_tiers
+        tiers = load_score_tiers(config)
+        if score >= tiers["moat_strong"]: ...
+
+    设计: 纯函数, 无全局状态, 调用方传入 config dict 即可;
+    config 为 None 或无 score_tiers 段时全部回退默认值, 行为与硬编码一致。
+    """
+    raw = (config or {}).get("score_tiers") or {}
+    return {k: raw.get(k, v) for k, v in _DEFAULT_SCORE_TIERS.items()}

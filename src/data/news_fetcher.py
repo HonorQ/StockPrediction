@@ -138,8 +138,8 @@ class NewsFetcher:
                         "source": row.get("文章来源", ""),
                     })
                 return news_list
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[news_fetcher.py:141] NewsFetcher/get_stock_news 失败(忽略): %s", e)
         return []
 
     # ------------------------------------------------------------------
@@ -284,7 +284,7 @@ class NewsFetcher:
             if isinstance(t, str):
                 try:
                     return datetime.strptime(t[:19], "%Y-%m-%d %H:%M:%S")
-                except:
+                except (ValueError, TypeError):
                     pass
             return datetime.min
         all_news.sort(key=_parse_time, reverse=True)

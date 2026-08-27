@@ -27,8 +27,8 @@ def _write_heartbeat(mode: str, status: str = "ok", error: str = None):
         }
         with open(HEARTBEAT_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass  # 心跳失败绝不影响主流程
+    except Exception as e:
+        logger.warning("[heartbeat.py:30] _write_heartbeat 失败(忽略): %s", e)
 
 
 def check_task_alerts(modes=("premarket", "intraday", "afternoon"),
@@ -59,7 +59,8 @@ def check_task_alerts(modes=("premarket", "intraday", "afternoon"),
                 gap = (now - last).days
                 if gap > max_gap_days:
                     alerts.append(f"{m}: 已 {gap} 天无成功运行(上次 {info['last_run']})")
-            except (KeyError, ValueError):
+            except (KeyError, ValueError) as e:
+                logger.warning("捕获异常已忽略(src/utils/heartbeat.py:62): %s", e)
                 pass
     except Exception as e:
         logger.warning("心跳检测失败: %s", e)

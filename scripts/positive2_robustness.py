@@ -8,6 +8,7 @@
 
 用法: python scripts/positive2_robustness.py
 """
+import logging
 import os
 import sys
 import glob
@@ -40,11 +41,13 @@ def load_size_proxy():
                             amt = float(r[1]) * float(r[2])
                             if amt > 0:
                                 vals.append(amt)
-                        except (ValueError, TypeError, IndexError):
+                        except (ValueError, TypeError, IndexError) as e:
+                            logging.warning("捕获异常已忽略(scripts/positive2_robustness.py:43): %s", e)
                             continue
                     if vals:
                         out[c] = float(np.median(vals))
-        except Exception:
+        except Exception as e:
+            logging.warning("捕获异常已忽略(scripts/positive2_robustness.py:47): %s", e)
             continue
     return out
 
@@ -58,7 +61,8 @@ def q10_q1_by_group(df: pd.DataFrame, group_col: str, ret_col="fwd10",
         try:
             rk = g[signal_col].rank(method="first")
             b = pd.qcut(rk, n_bins, labels=False)
-        except ValueError:
+        except ValueError as e:
+            logging.warning("捕获异常已忽略(scripts/positive2_robustness.py:61): %s", e)
             return None
         gg = g.assign(_b=b)
         hi = gg[gg["_b"] == n_bins - 1][ret_col]
@@ -121,7 +125,8 @@ def main():
         try:
             rk = g["positive2"].rank(method="first")
             b = pd.qcut(rk, 10, labels=False)
-        except ValueError:
+        except ValueError as e:
+            logging.warning("捕获异常已忽略(scripts/positive2_robustness.py:124): %s", e)
             return None
         top = g[b == 9]["fwd10"]
         if len(top) < 5:

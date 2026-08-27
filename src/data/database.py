@@ -17,4 +17,6 @@ class StockDatabase(PortfolioMixin, MarketMixin, FeedbackMixin,
     """组合类: MRO 保证 BaseStockDB.__init__ 最后执行。"""
 
 
-# 兼容 re-export(旧引用 from src.data.database import ...)
+# 兼容 re-export(旧引用 from src.data.database import ...):
+# SUB_SCORE_DIMS/DB_PATH 被 analyze_sub_ic / evaluate_recs / feedback_loop 等引用
+from src.data.database_const import SUB_SCORE_DIMS, DB_PATH  # noqa: F401

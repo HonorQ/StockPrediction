@@ -13,6 +13,7 @@ if ROOT not in sys.path:
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from src.utils.log import get_logger
+from src.utils.helpers import get_limit_pct
 
 logger = get_logger()
 
@@ -30,30 +31,21 @@ from src.pipeline.common import (  # noqa: F401
 )
 
 
-def run_intraday(config):
-    print("=" * 60)
-    print("  盘中模式 — 快速修正")
-    print(f"  运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
+def _id_snapshot_and_crash(ctx):
+    """[盘中·阶段1] 实时行情获取 → 大盘崩盘清仓检测 → 竞价快照落库。
 
-    _log_source_health()
+    行情为空时返回 None(调用方终止)；成功则把 price_map 写回 ctx。
+    """
+    config = ctx["config"]
+    today = ctx["today"]
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    cache = load_cache(f"premarket_{today}.json")
-    if cache is None:
-        print(f"  ❌ 未找到盘前缓存 cache/premarket_{today}.json")
-        print("  → 请先运行盘前模式: python run_daily.py --premarket")
-        return
-
-    print(f"  ✅ 载入盘前候选池: {len(cache['candidates'])} 只 (计算于 {cache['run_at']})")
-
-    # 1. 快速拉取实时行情
+    # 快速拉取实时行情
     print("\n[1/1] 获取实时开盘行情...")
     market_fetcher = MarketDataFetcher()
     fresh = market_fetcher.get_a_share_realtime()
     if fresh.empty:
         print("  ❌ 获取行情失败")
-        return
+        return None
 
     # 建立 代码→行 的快速索引
     fresh["代码_str"] = fresh["代码"].astype(str)
@@ -74,79 +66,16 @@ def run_intraday(config):
     except Exception as e:
         logger.warning('竞价快照落库失败(不影响主流程): %s', e)
 
-    # 2. 对候选池刷新评分（仅作观察池快照与预警依据，不产出买入推荐）
-    print("\n刷新候选池评分...")
-    candidates = cache["candidates"]
-    updated = []
-    excluded = []  # 涨跌停/停牌等不可交易票 → 预警输出
-    for c in candidates:
-        code = c["code"]
-        name = c["name"]
-        old_score = c["score"]
-        row = price_map.get(code)
+    ctx["price_map"] = price_map
+    return fresh
 
-        if row is None:
-            excluded.append({"code": code, "name": name, "reason": "停牌或无行情"})
-            continue
 
-        new_price = float(row.get("最新价", 0))
-        change_pct = float(row.get("涨跌幅", 0) or 0)
-        volume_ratio = float(row.get("量比", 0) or 0)
-        turnover = float(row.get("换手率", 0) or 0)
+def _id_filter_risky(updated, filter_cfg):
+    """入场风险过滤 → 返回 (kept, risky)。
 
-        if new_price <= 0:
-            excluded.append({"code": code, "name": name, "reason": "价格无效"})
-            continue
-
-        # 基础分 = 盘前评分（因子分）
-        intraday_score = old_score
-
-        # 价格偏离修正
-        old_price = c.get("premarket_price", 0)
-        if old_price > 0:
-            price_change_pct = (new_price - old_price) / old_price * 100
-            # 高开加分，低开减分
-            if price_change_pct > 3:
-                intraday_score += 3
-            elif price_change_pct > 1:
-                intraday_score += 1
-            elif price_change_pct < -3:
-                intraday_score -= 3
-            elif price_change_pct < -1:
-                intraday_score -= 1
-
-            # 涨停/跌停过滤 → 转为不可交易预警
-            if change_pct >= 9.5:
-                excluded.append({"code": code, "name": name,
-                                 "reason": f"涨停 {change_pct:+.1f}%，买不进"})
-                continue
-            if change_pct <= -9.5:
-                excluded.append({"code": code, "name": name,
-                                 "reason": f"跌停 {change_pct:+.1f}%，回避"})
-                continue
-
-        # 量比修正
-        if volume_ratio > 2:
-            intraday_score += 2
-        elif volume_ratio < 0.5:
-            intraday_score -= 1
-
-        # 换手修正
-        if turnover > 2:
-            intraday_score += 1
-
-        c["intraday_price"] = new_price
-        c["intraday_change"] = round(change_pct, 2)
-        c["intraday_score"] = round(intraday_score, 1)
-        c["volume_ratio"] = volume_ratio
-        updated.append(c)
-
-    # 3. 排序（仅作观察池快照）
-    updated.sort(key=lambda x: x["intraday_score"], reverse=True)
-
-    # === 入场风险过滤 → 转为高风险预警标记 ===
-    # 盘中模式复用盘前缓存，须与盘前一致的入场风险过滤，避免盘前判死的高风险票被盘中捞回
-    filter_cfg = config.get("filter", {})
+    盘中模式复用盘前缓存，须与盘前一致的入场风险过滤，
+    避免盘前判死的高风险票被盘中捞回。失败时原样返回(不影响主流程)。
+    """
     risky = []
     try:
         risk_inputs = []
@@ -172,6 +101,91 @@ def run_intraday(config):
         updated = [c for c in updated if c["code"] in kept_codes]
     except Exception as e:
         logger.warning("盘中入场风险过滤失败(不影响主流程): %s", e)
+    return updated, risky
+
+
+def _id_alerts_and_rescore(ctx):
+    """[盘中·阶段2] 候选池实时刷新评分 + 入场风险过滤 + 预警输出。
+
+    仅作观察池快照与预警依据，不产出买入推荐(T+1 设计约定)；
+    结果 updated/excluded/risky 写回 ctx。
+    """
+    config = ctx["config"]
+    cache = ctx["cache"]
+    price_map = ctx["price_map"]
+
+    # 对候选池刷新评分（仅作观察池快照与预警依据，不产出买入推荐）
+    print("\n刷新候选池评分...")
+    candidates = cache["candidates"]
+    updated = []
+    excluded = []  # 涨跌停/停牌等不可交易票 → 预警输出
+    for c in candidates:
+        code = c["code"]
+        name = c["name"]
+        old_score = c["score"]
+        row = price_map.get(code)
+
+        if row is None:
+            excluded.append({"code": code, "name": name, "reason": "停牌或无行情"})
+            continue
+
+        new_price = float(row.get("最新价", 0))
+        change_pct = float(row.get("涨跌幅", 0) or 0)
+        volume_ratio = float(row.get("量比", 0) or 0)
+        turnover = float(row.get("换手率", 0) or 0)
+
+        if new_price <= 0:
+            excluded.append({"code": code, "name": name, "reason": "价格无效"})
+            continue
+
+        # 基础分 = 盘前评分（因子分），叠加价格偏离/量比/换手修正
+        intraday_score = old_score
+
+        # 价格偏离修正：高开加分，低开减分
+        old_price = c.get("premarket_price", 0)
+        if old_price > 0:
+            price_change_pct = (new_price - old_price) / old_price * 100
+            if price_change_pct > 3:
+                intraday_score += 3
+            elif price_change_pct > 1:
+                intraday_score += 1
+            elif price_change_pct < -3:
+                intraday_score -= 3
+            elif price_change_pct < -1:
+                intraday_score -= 1
+
+            # 涨停/跌停过滤 → 转为不可交易预警(按板块口径, 禁止硬编码9.5)
+            limit_pct = get_limit_pct(code, name)
+            if change_pct >= limit_pct - 0.5:
+                excluded.append({"code": code, "name": name,
+                                 "reason": f"涨停 {change_pct:+.1f}%，买不进"})
+                continue
+            if change_pct <= -limit_pct + 0.5:
+                excluded.append({"code": code, "name": name,
+                                 "reason": f"跌停 {change_pct:+.1f}%，回避"})
+                continue
+
+        # 量比修正
+        if volume_ratio > 2:
+            intraday_score += 2
+        elif volume_ratio < 0.5:
+            intraday_score -= 1
+
+        # 换手修正
+        if turnover > 2:
+            intraday_score += 1
+
+        c["intraday_price"] = new_price
+        c["intraday_change"] = round(change_pct, 2)
+        c["intraday_score"] = round(intraday_score, 1)
+        c["volume_ratio"] = volume_ratio
+        updated.append(c)
+
+    # 排序（仅作观察池快照）
+    updated.sort(key=lambda x: x["intraday_score"], reverse=True)
+
+    # === 入场风险过滤 → 转为高风险预警标记 ===
+    updated, risky = _id_filter_risky(updated, config.get("filter", {}))
 
     # === 预警输出 ===
     # 设计约定(T+1)：尾盘持有期从收盘起算，14:40 午后模式的报告才是买入决策依据；
@@ -199,7 +213,37 @@ def run_intraday(config):
               f"{c.get('intraday_change', 0):+.1f}% "
               f"量比{c.get('volume_ratio', 0):.1f}")
 
-    # 4. 生成预警版报告（不含推荐列表）
+    ctx["updated"] = updated
+    ctx["excluded"] = excluded
+    ctx["risky"] = risky
+
+
+def run_intraday(config):
+    print("=" * 60)
+    print("  盘中模式 — 快速修正")
+    print(f"  运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 60)
+
+    _log_source_health()
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    cache = load_cache(f"premarket_{today}.json")
+    if cache is None:
+        print(f"  ❌ 未找到盘前缓存 cache/premarket_{today}.json")
+        print("  → 请先运行盘前模式: python run_daily.py --premarket")
+        return
+
+    print(f"  ✅ 载入盘前候选池: {len(cache['candidates'])} 只 (计算于 {cache['run_at']})")
+
+    ctx = {"config": config, "today": today, "cache": cache}
+    if _id_snapshot_and_crash(ctx) is None:
+        return
+    _id_alerts_and_rescore(ctx)
+    updated = ctx["updated"]
+    excluded = ctx["excluded"]
+    risky = ctx["risky"]
+
+    # 生成预警版报告（不含推荐列表）
     print("\n生成盘中预警报告...")
     reporter = ReportGenerator()
     now_str = datetime.now().strftime("%H:%M")
@@ -225,7 +269,7 @@ def run_intraday(config):
     )
     report_path = reporter.save_report(report_content)
 
-    write_summary("intraday_watch", len(candidates), [],
+    write_summary("intraday_watch", len(cache["candidates"]), [],
                    excluded=len(excluded), risky=len(risky))
 
     print("\n" + "=" * 60)

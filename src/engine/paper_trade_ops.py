@@ -10,6 +10,7 @@ from datetime import datetime
 import pandas as pd
 
 from src.utils.log import get_logger
+from src.utils.helpers import get_limit_pct
 from src.engine.backtest import ATRStopLoss, PositionManager
 
 logger = get_logger()
@@ -43,8 +44,93 @@ def _fetch_close_price_on_date(market_fetcher, code: str, base_date: str, lookba
         # 无法找到精确的 T+N 交易日价格（如跨周末/数据未更新）→ 返回 None
         # 避免降级到最近价导致收益被错误算成 0.0（历史污染根因）
         return None
-    except Exception:
+    except Exception as e:
+        logger.warning(f"获取历史收盘价失败: {e}")
         return None
+
+
+def _fetch_today_close(market_fetcher, code):
+    """取 code 当日收盘价；失败返回 None（调用方顺延处理，禁止降级为 0.0）。"""
+    try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        return _fetch_close_price_on_date(market_fetcher, code, today_str, 0)
+    except Exception as e:
+        logger.warning(f"获取当日收盘价失败: {e}")
+        return None
+
+
+def _try_close_expired(db, market_fetcher, t, hold_days, today):
+    """持仓到期平仓检查。返回 'closed'(已平) / 'defer'(顺延) / 'not_due'(未到期)。
+
+    到期但不取得到价时顺延(下日再试), 不用入场价强行平仓——
+    那会把"未知收益"记成 0.0, 污染纸面交易统计。
+    """
+    entry_date = t.get("entry_date") or t["trade_date"]
+    d0 = datetime.strptime(entry_date, "%Y-%m-%d")
+    d1 = datetime.strptime(today, "%Y-%m-%d")
+    if (d1 - d0).days < hold_days:
+        return "not_due"
+
+    close_price = _fetch_today_close(market_fetcher, t["code"])
+    if not close_price or close_price <= 0:
+        print(f"    ⏳ {t.get('name', t['code'])}: 到期但取不到当日价格，顺延平仓")
+        return "defer"
+
+    ret_pct = (close_price / t.get("entry_price") - 1) * 100
+    db.close_paper_trade(
+        trade_id=t["id"],
+        exit_date=today,
+        exit_price=close_price,
+        exit_reason="hold_expire",
+        max_drawdown_pct=t.get("max_drawdown_pct") or ret_pct,
+        max_profit_pct=t.get("max_profit_pct") or ret_pct,
+    )
+    print(f"    📤 {t.get('name', t['code'])}: hold_expire (收益 {ret_pct:+.1f}%)")
+    return "closed"
+
+
+def _judge_exit(stored, close_price, ret_pct, new_max_profit, trade_cfg,
+                db=None, trade_id=None):
+    """按优先级判定平仓原因: ATR止损 > ATR止盈 > 追踪止盈 > 固定止损 > 固定止盈。
+
+    口径(全项目唯一): ret_pct/new_max_profit 为百分数(1.0=1%);
+    stop_loss_pct/take_profit_pct/trailing_pct 为小数比例或百分数见 config。
+    追踪止盈激活且上移时会就地更新 stored 并持久化(经 db.update_trade_config)。
+    """
+    # 1./2. ATR 动态止损/止盈
+    atr_sl = stored.get("stop_loss_price")
+    if atr_sl and close_price <= atr_sl:
+        return "stop_loss"
+    atr_tp = stored.get("take_profit_price")
+    if atr_tp and close_price >= atr_tp:
+        return "take_profit"
+
+    # 3. 追踪止盈: 浮盈达 5% 自动激活, 自高点回撤 trailing_pct 触发
+    trailing_activated = stored.get("trailing_activated", False) or new_max_profit >= 5.0
+    if trailing_activated:
+        current_trailing = stored.get("trailing_stop_price", 0)
+        trailing_pct = stored.get("trailing_pct", 3.0)
+        trailing_price = round(close_price * (1 - trailing_pct / 100), 2)
+
+        if current_trailing > 0 and close_price <= current_trailing:
+            return "trailing_stop"
+        if trailing_price > current_trailing:
+            stored["trailing_activated"] = True
+            stored["trailing_stop_price"] = trailing_price
+            if db is not None:
+                try:
+                    db.update_trade_config(trade_id, stored)
+                except Exception as e:
+                    logger.warning("追踪止盈位持久化失败(trade=%s): %s", trade_id, e)
+
+    # 4./5. 固定百分比止损/止盈（fallback）
+    sl_pct = stored.get("stop_loss_pct") or trade_cfg.get("stop_loss_pct", -0.05)
+    if ret_pct / 100 <= sl_pct:
+        return "stop_loss"
+    tp_pct = stored.get("take_profit_pct") or trade_cfg.get("take_profit_pct", 0.08)
+    if ret_pct / 100 >= tp_pct:
+        return "take_profit"
+    return None
 
 
 def _update_open_paper_trades(db, market_fetcher, trade_cfg: dict, today: str):
@@ -69,45 +155,21 @@ def _update_open_paper_trades(db, market_fetcher, trade_cfg: dict, today: str):
         code = t["code"]
         name = t.get("name", code)
         trade_id = t["id"]
-        entry_date = t.get("entry_date") or t["trade_date"]
 
         # ===== 优先检查持仓到期（不依赖价格） =====
         try:
-            d0 = datetime.strptime(entry_date, "%Y-%m-%d")
-            d1 = datetime.strptime(today, "%Y-%m-%d")
-            if (d1 - d0).days >= hold_days:
-                # 持仓到期：尝试取当日收盘价平仓
-                try:
-                    today_str = datetime.now().strftime("%Y-%m-%d")
-                    close_price = _fetch_close_price_on_date(market_fetcher, code, today_str, 0)
-                except Exception:
-                    close_price = None
-                # 取不到价格时跳过(下日再试)，不用入场价强行平仓——
-                # 那会把"未知收益"记成 0.0，污染纸面交易统计
-                if not close_price or close_price <= 0:
-                    print(f"    ⏳ {name}: 到期但取不到当日价格，顺延平仓")
-                    continue
-                ret_pct = (close_price / entry_price - 1) * 100
-                db.close_paper_trade(
-                    trade_id=trade_id,
-                    exit_date=today,
-                    exit_price=close_price,
-                    exit_reason="hold_expire",
-                    max_drawdown_pct=t.get("max_drawdown_pct") or ret_pct,
-                    max_profit_pct=t.get("max_profit_pct") or ret_pct,
-                )
-                closed_count += 1
-                print(f"    📤 {name}: hold_expire (收益 {ret_pct:+.1f}%)")
-                continue  # 已处理到期，跳过后续止损/止盈检查
-        except Exception:
-            pass
+            status = _try_close_expired(db, market_fetcher, t, hold_days, today)
+        except Exception as e:
+            logger.warning("到期检查失败(trade=%s): %s", trade_id, e)
+            status = "not_due"
+        if status == "closed":
+            closed_count += 1
+            continue
+        if status == "defer":
+            continue
 
         # ===== 取当日收盘价用于止损/止盈判断 =====
-        try:
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            close_price = _fetch_close_price_on_date(market_fetcher, code, today_str, 0)
-        except Exception:
-            close_price = None
+        close_price = _fetch_today_close(market_fetcher, code)
         if not close_price or close_price <= 0:
             continue  # 无法取价，跳过止损/止盈（到期已在上面处理）
 
@@ -117,7 +179,8 @@ def _update_open_paper_trades(db, market_fetcher, trade_cfg: dict, today: str):
         try:
             raw = t.get("trade_config")
             stored = json.loads(raw) if isinstance(raw, str) else (raw or {})
-        except Exception:
+        except Exception as e:
+            logger.warning(f"解析交易配置失败: {e}")
             stored = {}
 
         prev_max_drawdown = t.get("max_drawdown_pct") or 0
@@ -131,50 +194,10 @@ def _update_open_paper_trades(db, market_fetcher, trade_cfg: dict, today: str):
             max_profit_pct=new_max_profit,
         )
 
-        # 判断平仓条件（按优先级）
-        exit_reason = None
-
-        # 1. ATR动态止损
-        atr_sl = stored.get("stop_loss_price")
-        if atr_sl and close_price <= atr_sl:
-            exit_reason = "stop_loss"
-
-        # 2. ATR动态止盈
-        if not exit_reason:
-            atr_tp = stored.get("take_profit_price")
-            if atr_tp and close_price >= atr_tp:
-                exit_reason = "take_profit"
-
-        # 3. 追踪止盈
-        if not exit_reason:
-            trailing_activated = stored.get("trailing_activated", False) or new_max_profit >= 5.0
-            if trailing_activated:
-                current_trailing = stored.get("trailing_stop_price", 0)
-                trailing_pct = stored.get("trailing_pct", 3.0)
-                trailing_price = round(close_price * (1 - trailing_pct / 100), 2)
-
-                if current_trailing > 0 and close_price <= current_trailing:
-                    exit_reason = "trailing_stop"
-                elif trailing_price > current_trailing:
-                    stored["trailing_activated"] = True
-                    stored["trailing_stop_price"] = trailing_price
-                    try:
-                        db.update_trade_config(trade_id, stored)
-                    except Exception:
-                        pass
-
-        # 4. 固定百分比止损（fallback）
-        if not exit_reason:
-            sl_pct = stored.get("stop_loss_pct") or trade_cfg.get("stop_loss_pct", -0.05)
-            if ret_pct / 100 <= sl_pct:
-                exit_reason = "stop_loss"
-
-        # 5. 固定百分比止盈（fallback）
-        if not exit_reason:
-            tp_pct = stored.get("take_profit_pct") or trade_cfg.get("take_profit_pct", 0.08)
-            if ret_pct / 100 >= tp_pct:
-                exit_reason = "take_profit"
-
+        exit_reason = _judge_exit(
+            stored, close_price, ret_pct, new_max_profit, trade_cfg,
+            db=db, trade_id=trade_id,
+        )
         if exit_reason:
             db.close_paper_trade(
                 trade_id=trade_id,
@@ -205,11 +228,20 @@ def _check_crash_and_close_positions(fresh, config):
     if change_col not in fresh.columns:
         return
 
-    changes = pd.to_numeric(fresh[change_col], errors="coerce").dropna()
-    if changes.empty:
+    changes = pd.to_numeric(fresh[change_col], errors="coerce")
+    if changes.dropna().empty:
         return
 
-    limit_down_count = int((changes <= -9.5).sum())
+    # 跌停家数按各板块实际幅度判定(20cm/30cm/ST 5%), 容差0.5pct对齐四舍五入
+    code_col = "代码" if "代码" in fresh.columns else None
+    name_col = "名称" if "名称" in fresh.columns else None
+    if code_col:
+        def _down_line(r):
+            pct = get_limit_pct(str(r[code_col]), str(r.get(name_col) or "") if name_col else "")
+            return -(pct - 0.5)
+        limit_down_count = int((changes <= fresh.apply(_down_line, axis=1)).sum())
+    else:
+        limit_down_count = int((changes <= -9.5).sum())  # 兜底: 无代码列时沿用主板口径
     avg_change = float(changes.mean())
 
     if limit_down_count < limit_down_threshold and avg_change >= avg_change_threshold:
@@ -295,7 +327,8 @@ def _open_paper_trades_for_recs(db, market_fetcher, trade_cfg: dict,
                     atr_series = atr_calc.calculate_atr(hist)
                     atr_raw = float(atr_series.iloc[-1]) if not atr_series.empty else 0
                     atr_value = atr_raw if atr_raw > entry_price * 0.005 else 0
-            except Exception:
+            except Exception as e:
+                logger.warning(f"计算ATR失败: {e}")
                 atr_value = 0
 
         pos_info = pos_mgr.calculate_position(score, account_capital, max(entry_price, 1))

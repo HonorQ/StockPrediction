@@ -46,8 +46,8 @@ def fetch_kline(code, start, end, use_cache=True):
             try:
                 with open(cp, "rb") as f:
                     return code, pickle.load(f)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[run_feedback_training.py:49] fetch_kline 失败(忽略): %s", e)
     rs = bs.query_history_k_data_plus(
         code, "date,close,volume,turn,pctChg,open,high,low",
         start_date=start, end_date=end, frequency="d", adjustflag="3"
@@ -60,7 +60,8 @@ def fetch_kline(code, start, end, use_cache=True):
             cp = _kline_cache_path(code)
             with open(cp, "wb") as f:
                 pickle.dump(rows, f)
-        except Exception:
+        except Exception as e:
+            logger.warning("捕获异常已忽略(run_feedback_training.py:63): %s", e)
             import traceback; traceback.print_exc()
     return code, rows
 
@@ -170,7 +171,8 @@ def compute_sub_scores(date, stocks, kc, market_kc=None):
         # 当前价 = 切片最后一行的 close
         try:
             price = float(rows[-1][1])
-        except (ValueError, IndexError):
+        except (ValueError, IndexError) as e:
+            logger.warning("捕获异常已忽略(run_feedback_training.py:173): %s", e)
             continue
         if price <= 0:
             continue
@@ -304,7 +306,8 @@ def update_future_returns(db, kc, today):
             continue
         try:
             trade_dt = datetime.strptime(date_str, "%Y-%m-%d")
-        except ValueError:
+        except ValueError as e:
+            logger.warning("捕获异常已忽略(run_feedback_training.py:307): %s", e)
             continue
         # kc 的键为 baostock 原始格式（含点，如 "sh.510060"），
         # 而存储/候选的 code 已去点（如 "sh510060"），这里补回点以匹配 kc
@@ -328,7 +331,8 @@ def update_future_returns(db, kc, today):
             if len(future) >= off:
                 try:
                     ep = float(future[off - 1][1])
-                except (ValueError, IndexError):
+                except (ValueError, IndexError) as e:
+                    logger.warning("捕获异常已忽略(run_feedback_training.py:331): %s", e)
                     continue
                 if ep > 0:
                     db.update_performance(date_str, code,

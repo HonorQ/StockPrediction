@@ -13,6 +13,45 @@ from datetime import datetime, timedelta
 class PortfolioMixin:
     """见模块 docstring。"""
 
+    def _create_paper_trade_tables(self, conn):
+        """建表: 纸面交易域。由 _init_db 调用, 接收已开启 PRAGMA 的连接。"""
+
+        # 持仓跟踪表：跟踪每只推荐股票的完整交易生命周期
+        # 与 recommendations 表互补：recommendations 记录 d1/d3/d5/d10 收益统计；
+        # paper_trades 模拟真实交易（止损/止盈/到期平仓），用于评估策略实盘表现
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS paper_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                code TEXT NOT NULL,
+                name TEXT NOT NULL,
+                score REAL,
+                entry_price REAL,
+                entry_date TEXT,
+                exit_date TEXT,
+                exit_price REAL,
+                exit_reason TEXT,
+                return_pct REAL,
+                pnl REAL,
+                position_pct REAL,
+                shares INTEGER,
+                holding_days INTEGER,
+                max_drawdown_pct REAL,
+                max_profit_pct REAL,
+                trade_config TEXT,
+                status TEXT DEFAULT 'open',
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_pt_status ON paper_trades(status)
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_pt_code_date ON paper_trades(code, trade_date)
+        """)
+
     def open_paper_trade(self, trade_date: str, code: str, name: str,
                          score: float, entry_price: float,
                          position_pct: float = None, shares: int = None,
@@ -82,8 +121,8 @@ class PortfolioMixin:
                     d0 = datetime.strptime(entry_row["entry_date"], "%Y-%m-%d")
                     d1 = datetime.strptime(exit_date, "%Y-%m-%d")
                     holding_days = (d1 - d0).days
-            except Exception:
-                pass
+            except (ValueError, TypeError):
+                pass  # entry_date 脏数据时保持 NULL
 
             conn.execute(
                 """UPDATE paper_trades
@@ -126,35 +165,28 @@ class PortfolioMixin:
 
 
     def get_open_paper_trades(self) -> List[Dict]:
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM paper_trades WHERE status='open' ORDER BY trade_date DESC"
-            ).fetchall()
-        return [dict(r) for r in rows]
+        return self._fetch_all(
+            "SELECT * FROM paper_trades WHERE status='open' ORDER BY trade_date DESC"
+        )
 
 
     def has_open_position(self, code: str) -> bool:
         """检查某个股票是否已有未平仓的 paper_trade（避免重复建仓）"""
-        with self._connection() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM paper_trades WHERE code=? AND status='open' LIMIT 1",
-                (code,)
-            ).fetchone()
+        row = self._fetch_one(
+            "SELECT 1 FROM paper_trades WHERE code=? AND status='open' LIMIT 1",
+            (code,)
+        )
         return row is not None
 
 
     def get_closed_paper_trades(self, days: int = 30) -> List[Dict]:
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-            rows = conn.execute(
-                """SELECT * FROM paper_trades
-                   WHERE status='closed' AND trade_date >= ?
-                   ORDER BY exit_date DESC""",
-                (cutoff,)
-            ).fetchall()
-        return [dict(r) for r in rows]
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        return self._fetch_all(
+            """SELECT * FROM paper_trades
+               WHERE status='closed' AND trade_date >= ?
+               ORDER BY exit_date DESC""",
+            (cutoff,)
+        )
 
 
     def get_paper_trade_stats(self, days: int = 30) -> Dict:
@@ -201,12 +233,10 @@ class PortfolioMixin:
         """返回该股票的 {factor_name: weight} 字典。
         若该股票没有任何记录，返回空 dict（调用方应 fallback 到全局权重）。
         """
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT factor_name, weight FROM stock_factor_weights WHERE code=?",
-                (code,)
-            ).fetchall()
+        rows = self._fetch_all(
+            "SELECT factor_name, weight FROM stock_factor_weights WHERE code=?",
+            (code,)
+        )
         if not rows:
             return {}
         return {r["factor_name"]: r["weight"] for r in rows}
@@ -214,13 +244,11 @@ class PortfolioMixin:
 
     def get_stock_weight_stats(self, code: str) -> Dict[str, Dict]:
         """返回该股票每个因子的完整统计 {factor: {weight, samples, accuracy}}"""
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """SELECT factor_name, weight, samples, accuracy
-                   FROM stock_factor_weights WHERE code=?""",
-                (code,)
-            ).fetchall()
+        rows = self._fetch_all(
+            """SELECT factor_name, weight, samples, accuracy
+               FROM stock_factor_weights WHERE code=?""",
+            (code,)
+        )
         return {
             r["factor_name"]: {
                 "weight": r["weight"],
@@ -235,11 +263,9 @@ class PortfolioMixin:
         """批量加载所有股票的权重，返回 {code: {factor: weight}}。
         回测主循环用，避免 N+1 查询。
         """
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT code, factor_name, weight FROM stock_factor_weights"
-            ).fetchall()
+        rows = self._fetch_all(
+            "SELECT code, factor_name, weight FROM stock_factor_weights"
+        )
         result: Dict[str, Dict[str, float]] = {}
         for r in rows:
             result.setdefault(r["code"], {})[r["factor_name"]] = r["weight"]

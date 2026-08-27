@@ -3,6 +3,7 @@
 
 使用baostock拉取A股股票的历史K线数据，用于训练和回测。
 """
+import logging
 import os
 import sys
 import time
@@ -10,6 +11,8 @@ import pickle
 import hashlib
 import baostock as bs
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -111,8 +114,8 @@ def fetch_and_cache(code, start, end, use_cache=True, force=False):
                         # 如果数据覆盖1年以上，直接使用
                         if first_date <= start and last_date >= end:
                             return data
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[fetch_1year_data.py:117] fetch_and_cache 失败(忽略): %s", e)
     
     rows = fetch_kline(code, start, end)
     if rows:
@@ -120,8 +123,8 @@ def fetch_and_cache(code, start, end, use_cache=True, force=False):
             cp = cache_path(code)
             with open(cp, "wb") as f:
                 pickle.dump(rows, f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[fetch_1year_data.py:126] fetch_and_cache 失败(忽略): %s", e)
     return rows
 
 
@@ -166,15 +169,16 @@ def main():
                             cached_count += 1
                             success_count += 1
                             continue
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("[fetch_1year_data.py:172] main 失败(忽略): %s", e)
                 
                 rows = fetch_and_cache(code, start_date, end_date, force=True)
                 if rows and len(rows) > 0:
                     success_count += 1
                 else:
                     fail_count += 1
-            except Exception:
+            except Exception as e:
+                logger.warning("捕获异常已忽略(scripts/fetch_1year_data.py:180): %s", e)
                 fail_count += 1
             
             # 进度显示

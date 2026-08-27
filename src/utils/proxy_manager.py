@@ -139,7 +139,8 @@ class ProxyManager:
                 timeout=3,
             )
             return r.status_code == 200
-        except Exception:
+        except Exception as e:
+            logger.warning(f"验证代理失败: {e}")
             return False
 
     def _fetch_free_proxies(self):
@@ -156,8 +157,8 @@ class ProxyManager:
                 if r.status_code == 200:
                     proxies = [p.strip() for p in r.text.strip().split("\n") if p.strip()]
                     all_proxies.extend(proxies)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[proxy_manager.py:159] ProxyManager/_fetch_free_proxies 失败(忽略): %s", e)
 
         valid_format = [p for p in all_proxies if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+$', p)]
         random.shuffle(valid_format)
@@ -185,8 +186,8 @@ class ProxyManager:
                 age = time.time() - data.get("time", 0)
                 if age < 3600:
                     self._free_proxies = cached
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[proxy_manager.py:188] ProxyManager/_fetch_free_proxies 失败(忽略): %s", e)
 
     def _save_cache(self):
         try:
@@ -195,5 +196,5 @@ class ProxyManager:
                 json.dumps({"proxies": self._free_proxies, "time": time.time()}, ensure_ascii=False),
                 encoding="utf-8",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[proxy_manager.py:198] ProxyManager/_save_cache 失败(忽略): %s", e)

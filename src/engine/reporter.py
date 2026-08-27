@@ -3,7 +3,7 @@
 """
 from src.utils.log import get_logger
 logger = get_logger()
-from src.engine.report_styles import CSS
+from src.engine.report_styles import CSS, FactorRowBuilder
 
 from datetime import datetime
 from typing import List, Dict
@@ -15,7 +15,7 @@ class ReportGenerator:
     """推荐报告生成器"""
 
     def __init__(self):
-        pass
+        self._row_builder = FactorRowBuilder()
 
     # ------------------------------------------------------------------
     # 公共接口
@@ -392,7 +392,8 @@ class ReportGenerator:
         moat_score = 0
         try:
             moat_score = float(bp.get("moat_score", 0) or 0)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.warning("捕获异常已忽略(src/engine/reporter.py:395): %s", e)
             moat_score = 0
         moat_level = str(bp.get("moat_level", "") or "")
         if moat_score >= 70:
@@ -404,7 +405,8 @@ class ReportGenerator:
         leader_score = 0
         try:
             leader_score = float(bp.get("moat_leader", 0) or 0)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.warning("捕获异常已忽略(src/engine/reporter.py:407): %s", e)
             leader_score = 0
         if is_leader and leader_score >= 75:
             reasons.append(("行业老大", "这个领域它说了算"))
@@ -493,7 +495,8 @@ class ReportGenerator:
             if v is not None:
                 try:
                     sub.append(f"{label} {float(v):.0f}")
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as e:
+                    logger.warning("捕获异常已忽略(src/engine/reporter.py:496): %s", e)
                     pass
         sub_html = f' <span style="color:#999;">({" / ".join(sub)})</span>' if sub else ""
 
@@ -507,308 +510,27 @@ class ReportGenerator:
 </div>"""
 
     # ------------------------------------------------------------------
-    # 因子行构建
+    # 因子行构建（代理到 FactorRowBuilder）
     # ------------------------------------------------------------------
+    @staticmethod
+    def _stars(n):
+        """★/☆ 强度条文本(最多5星)。"""
+        return FactorRowBuilder._stars(n)
+
     def _build_factor_rows(self, factors: Dict) -> List[str]:
-        rows = []
+        return self._row_builder._build_factor_rows(factors)
 
-        def add(category, label, val_str, strength_text, force=False):
-            # 根据强度文本映射 bar 宽度：★越多越强
-            stars = strength_text.count("★")
-            emoji_strong = ("🚫" in strength_text) or ("⚠️" in strength_text)
-            if emoji_strong:
-                bar_w = "100"
-            elif stars >= 4:
-                bar_w = "90"
-            elif stars == 3:
-                bar_w = "75"
-            elif stars == 2:
-                bar_w = "55"
-            elif stars == 1:
-                bar_w = "40"
-            else:
-                bar_w = "30"
-            cat_short = category.replace("⚠️ ", "").replace("🏆 ", "")[:2]
-            rows.append(
-                f'<div class="f-row"><span class="fl">{_html.escape(str(label))} {_html.escape(str(val_str))}</span>'
-                f'<span class="fv">{cat_short}<bar><i style="width:{bar_w}%"></i></bar></span></div>'
-            )
+    def _factor_rows_tech(self, factors: Dict, add) -> None:
+        self._row_builder._factor_rows_tech(factors, add)
 
-        def star(n):
-            return "★" * min(n, 5) + "☆" * max(0, 5 - n)
+    def _factor_rows_sentiment(self, factors: Dict, add) -> None:
+        self._row_builder._factor_rows_sentiment(factors, add)
 
-        # 基础因子
-        signal_map = {
-            "macd_golden_cross": ("MACD金叉", "趋势"),
-            "ma_bullish": ("均线多头排列", "趋势"),
-            "breakout_20d_high": ("突破20日新高", "趋势"),
-            "volume_price_up": ("量价齐升", "量价"),
-            "news_score": ("消息面利好", "消息"),
-            "in_hot_list": ("同花顺热股榜", "情绪"),
-        }
-        for factor_key, (label, category) in signal_map.items():
-            val = factors.get(factor_key, 0)
-            if factor_key == "news_score":
-                if val > 75:
-                    add(category, label, f"({val:.0f}分)", star(4))
-                elif val > 60:
-                    add(category, label, f"({val:.0f}分)", star(3))
-            elif val == 1:
-                add(category, label, "", star(5))
+    def _factor_rows_fundamental(self, factors: Dict, add) -> None:
+        self._row_builder._factor_rows_fundamental(factors, add)
 
-        # 策略信号
-        strategies = factors.get("strategies_triggered", [])
-        if strategies:
-            add("策略", "、".join(strategies), "", star(5))
-
-        # 筹码分布
-        chip_score = factors.get("chip_score", 50)
-        if chip_score > 65:
-            chip_info = []
-            if factors.get("chip_above_peak") == 1:
-                chip_info.append("突破筹码峰")
-            if factors.get("chip_profit_ratio", 0) > 0.6:
-                chip_info.append(f"获利盘{factors.get('chip_profit_ratio', 0)*100:.0f}%")
-            conc = factors.get("chip_concentration_70", 0)
-            if conc < 0.15:
-                chip_info.append("筹码高度集中")
-            if chip_info:
-                add("筹码", ", ".join(chip_info), "", star(4))
-
-        # 基本面
-        pe = factors.get("pe", 0)
-        pb = factors.get("pb", 0)
-        mv = factors.get("total_mv_yi", 0)
-        if pe > 0 and pe < 25:
-            add("基本面", f"PE={pe:.1f}（低估）", "", star(4))
-        if pb > 0 and pb < 2:
-            add("基本面", f"PB={pb:.1f}（低估）", "", star(3))
-        if 50 < mv < 500:
-            add("基本面", f"市值{mv:.0f}亿（中盘）", "", star(3))
-
-        # 人气
-        hot_rank = factors.get("hot_rank", 0)
-        if 0 < hot_rank <= 30:
-            add("人气", f"热股榜第{hot_rank}名", "", star(5))
-
-        # 机构持股
-        inst_count = factors.get("inst_holding_count", 0)
-        inst_ratio = factors.get("inst_holding_ratio", 0)
-        if inst_count > 10:
-            add("机构", f"{inst_count}家机构持股", "", star(4))
-        elif inst_count > 0:
-            add("机构", f"{inst_count}家机构持股", "", star(3))
-        if inst_ratio > 20:
-            add("机构", f"持股比例{inst_ratio:.1f}%", "", star(4))
-
-        # 相对强弱
-        rs_5d = factors.get("relative_strength_5d", 0)
-        rs_20d = factors.get("relative_strength_20d", 0)
-        if rs_5d > 2:
-            add("强弱", f"5日超额收益+{rs_5d:.1f}%", "", star(4))
-        elif rs_5d < -2:
-            add("弱势", f"5日超额收益{rs_5d:.1f}%", "", "⚠️")
-        if rs_20d > 5:
-            add("强弱", f"20日超额收益+{rs_20d:.1f}%", "", star(5))
-
-        # 超跌反弹
-        if factors.get("oversold_rebound_detected"):
-            rebound_signals = factors.get("oversold_rebound_signals", [])
-            if rebound_signals:
-                add("超跌反弹", ", ".join(rebound_signals[:3]), "", star(5))
-
-        # 反弹持续性
-        sustainability_score = factors.get("sustainability_score", 50)
-        rebound_type = factors.get("rebound_type", "unknown")
-        type_map = {"capital_driven": "资金驱动型", "emotion_repair": "情绪修复型", "technical": "技术性反弹"}
-        if rebound_type in type_map:
-            if sustainability_score >= 65:
-                add("持续性", f"{type_map[rebound_type]}（{sustainability_score}分）", "", star(4))
-            elif sustainability_score <= 40:
-                add("持续性", f"{type_map[rebound_type]}（{sustainability_score}分）", "", "⚠️")
-
-        # 次日预判
-        next_day = factors.get("next_day_prediction", {})
-        if not isinstance(next_day, dict):
-            next_day = {}
-        if next_day:
-            bias = next_day.get("bias", "neutral")
-            suggestion = next_day.get("trading_suggestion", "")
-            bias_map = {"bullish": "📈 看多", "slightly_bullish": "📈 偏多", "bearish": "📉 看空",
-                        "slightly_bearish": "📉 偏空", "neutral": "➡️ 中性"}
-            if bias in bias_map:
-                s = star(3) if "bullish" in bias else ("⚠️" if "bearish" in bias else star(2))
-                add("次日预判", bias_map[bias], "", s)
-            if suggestion:
-                add("操作建议", suggestion, "", "-")
-
-        # 深度研究
-        deep_score = factors.get("deep_research_score", 0)
-        if deep_score > 0:
-            ref = factors.get("historical_reference", "")
-            factors.get("prediction_confidence", 0)
-            factors.get("volatility_regime", "")
-            factors.get("position_at", "")
-            if deep_score > 65:
-                add("深度研究", f"历史匹配({deep_score}分)", ref, star(4))
-            elif deep_score > 50:
-                add("深度研究", f"历史匹配({deep_score}分)", ref, star(3))
-            else:
-                add("深度研究", f"历史匹配({deep_score}分)", ref, "⚠️")
-            # 深度研究信号
-            dr_signals = factors.get("deep_research_signals", [])
-            for s in dr_signals[:2]:
-                if "⚠" in s:
-                    add("深度研究", s, "", "⚠️")
-                else:
-                    add("深度研究", s, "", star(3))
-
-        # 预期透支
-        if factors.get("expectation_overvalued"):
-            reasons = factors.get("expectation_reasons", [])
-            if reasons:
-                add("⚠️ 预期透支", reasons[0], "", "🚫")
-
-        # 利好兑现
-        if factors.get("event_priced"):
-            signals = factors.get("event_pricing_signals", [])
-            if signals:
-                add("⚠️ 利好兑现", signals[0], "", "🚫")
-
-        # 获利盘出逃
-        if factors.get("profit_taking_detected"):
-            signals = factors.get("profit_taking_signals", [])
-            if signals:
-                add("⚠️ 获利出逃", signals[0], "", "🚫")
-
-        # A股特色因子
-        reversion_signal = factors.get("reversion_signal", "neutral")
-        if reversion_signal in ["strong_buy", "buy"]:
-            add("均值回归", f"偏离20日均线{factors.get('deviation_20d', 0):.1f}%（超卖）", "", star(4))
-        elif reversion_signal in ["strong_sell", "sell"]:
-            add("均值回归", f"偏离20日均线{factors.get('deviation_20d', 0):.1f}%（超买）", "", "⚠️")
-
-        # 波动率
-        volatility_level = factors.get("volatility_level", "")
-        if volatility_level == "low":
-            add("波动率", "低波动（安全）", "", star(3))
-        elif volatility_level in ["extreme_high", "high"]:
-            add("波动率", "高波动（风险大）", "", "⚠️")
-
-        # 游资行为
-        hot_money_signals = factors.get("hot_money_signals", [])
-        if hot_money_signals:
-            add("游资", hot_money_signals[0], "", star(4))
-
-        # 价格位置
-        position_signal = factors.get("position_signal", "")
-        if position_signal:
-            if "底部" in position_signal:
-                add("价格位置", position_signal, "", star(5))
-            elif "顶部" in position_signal:
-                add("价格位置", position_signal, "", "⚠️")
-            else:
-                add("价格位置", position_signal, "", star(3))
-
-        # 情绪周期
-        sentiment_cycle = factors.get("sentiment_cycle", {})
-        cycle_phase = sentiment_cycle.get("cycle_phase", "")
-        if cycle_phase in ["冰点", "低迷"]:
-            add("情绪周期", f"{cycle_phase}（可布局）", "", star(4))
-        elif cycle_phase in ["亢奋"]:
-            add("情绪周期", f"{cycle_phase}（注意风险）", "", "⚠️")
-
-        # 量化行为
-        quant_detected = factors.get("quant_detected", False)
-        quant_risk = factors.get("quant_risk", "low")
-        quant_signals = factors.get("quant_signals", [])
-        if quant_detected:
-            qs = quant_signals[0] if quant_signals else ""
-            if quant_risk == "high":
-                add("⚠️ 量化风险", f"高（{qs}）", "", "🚫")
-            elif quant_risk == "medium":
-                add("⚠️ 量化风险", f"中（{qs}）", "", "⚠️")
-            else:
-                add("量化行为", qs, "", star(3))
-
-        # 融资融券
-        margin_signals = factors.get("margin_signals", [])
-        margin_trend = factors.get("margin_trend", "neutral")
-        if margin_signals:
-            if margin_trend == "active":
-                add("融资", margin_signals[0], "", star(4))
-            elif "融券" in margin_signals[0]:
-                add("⚠️ 融券", margin_signals[0], "", "⚠️")
-
-        # 股东增减持
-        shareholder_signals = factors.get("shareholder_signals", [])
-        shareholder_trend = factors.get("shareholder_trend", "neutral")
-        if shareholder_signals:
-            if shareholder_trend == "increase":
-                add("股东", shareholder_signals[0], "", star(5))
-            elif shareholder_trend == "decrease":
-                add("⚠️ 股东", shareholder_signals[0], "", "🚫")
-
-        # 解禁风险
-        lockup_signals = factors.get("lockup_signals", [])
-        lockup_risk = factors.get("lockup_risk", "low")
-        if lockup_signals and lockup_risk == "high":
-            add("⚠️ 解禁", lockup_signals[0], "", "🚫")
-
-        # 涨停板质量
-        limit_signals = factors.get("limit_signals", [])
-        limit_quality = factors.get("limit_quality", "unknown")
-        if limit_signals:
-            if limit_quality in ["连板", "一字板"]:
-                add("涨停质量", limit_signals[0], "", star(5))
-            elif limit_quality == "首板":
-                add("涨停质量", limit_signals[0], "", star(4))
-            elif limit_quality == "跌停":
-                add("⚠️ 涨停质量", limit_signals[0], "", "🚫")
-
-        # 板块联动
-        sector_signals = factors.get("sector_signals", [])
-        if sector_signals:
-            for s in sector_signals[:2]:
-                if "涨" in s:
-                    add("板块联动", s, "", star(4))
-                else:
-                    add("板块联动", s, "", "⚠️")
-
-        # 龙头信号
-        leader_signals = factors.get("leader_signals", [])
-        is_leader = factors.get("is_leader", False)
-        if leader_signals:
-            if is_leader:
-                add("🏆 龙头", leader_signals[0], "", star(5))
-            else:
-                add("龙头", leader_signals[0], "", star(3))
-
-        # 资金流向持续性
-        flow_signals = factors.get("flow_continuity_signals", [])
-        flow_continuity = factors.get("flow_continuity", "neutral")
-        if flow_signals:
-            if flow_continuity in ["strong_inflow", "inflow"]:
-                add("资金持续", flow_signals[0], "", star(5))
-            elif flow_continuity in ["strong_outflow", "outflow"]:
-                add("⚠️ 资金流出", flow_signals[0], "", "🚫")
-            elif flow_continuity == "reversal":
-                add("资金逆转", flow_signals[0], "", star(4))
-
-        # 机构调研
-        research_signals = factors.get("research_signals", [])
-        if research_signals:
-            add("机构", research_signals[0], "", star(4))
-
-        # 龙虎榜
-        lh_signals = factors.get("lh_signals", [])
-        if lh_signals:
-            if any("出货" in s for s in lh_signals):
-                add("⚠️ 龙虎榜", lh_signals[0], "", "🚫")
-            else:
-                add("龙虎榜", lh_signals[0], "", star(4))
-
-        return rows
+    def _factor_rows_event(self, factors: Dict, add) -> None:
+        self._row_builder._factor_rows_event(factors, add)
 
     # ------------------------------------------------------------------
     # 历史推荐

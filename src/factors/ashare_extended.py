@@ -196,13 +196,14 @@ class LockUpExpiryFactor:
                                             result["lockup_score"] -= 10
                                         result["lockup_signals"].append(f"{days_to_unlock}天后解禁{unlock_shares/1e4:.0f}万股")
                                         break
-                        except:
+                        except (ValueError, TypeError) as e:
+                            logger.warning("捕获异常已忽略(src/factors/ashare_extended.py:199): %s", e)
                             continue
-            except:
-                pass
+            except Exception as e:
+                logger.warning("LockUpExpiryFactor 解禁数据获取失败(%s): %s", stock_code, e)
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("LockUpExpiryFactor.calculate(%s) 失败: %s", stock_code, e)
 
         return result
 

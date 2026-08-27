@@ -16,8 +16,11 @@
 """
 import os
 import sys
+import logging
 from typing import Dict, List, Optional
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
@@ -80,7 +83,8 @@ class StockWeightManager:
         try:
             fetcher = MarketDataFetcher()
             self._industry_map = fetcher.get_industry_map()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"获取行业映射失败: {e}")
             self._industry_map = {}
         if not self._industry_map:
             self._industry_map = {}
@@ -189,29 +193,19 @@ class StockWeightManager:
             return []
 
         # 1. 聚合该股票每个因子的 correct/wrong 计数（带时序衰减）
+        # 衰减口径与 feedback_loop.recency_decay 全局一致
+        from src.engine.feedback_loop import days_ago_of, recency_decay
         from datetime import datetime as _dt
         try:
             today_dt = _dt.strptime(trade_date, "%Y-%m-%d")
-        except Exception:
+        except Exception as e:
+            logger.warning(f"解析交易日期失败: {e}")
             today_dt = _dt.now()
 
         factor_correct = defaultdict(float)
         factor_wrong = defaultdict(float)
         for rec in attribution_records:
-            # 时序衰减权重
-            try:
-                rec_dt = _dt.strptime(rec.get("trade_date", ""), "%Y-%m-%d")
-                days_ago = (today_dt - rec_dt).days
-            except Exception:
-                days_ago = 999
-            if days_ago <= 5:
-                decay = 1.0
-            elif days_ago <= 15:
-                decay = 0.7
-            elif days_ago <= 30:
-                decay = 0.4
-            else:
-                decay = 0.2
+            decay = recency_decay(days_ago_of(rec.get("trade_date", ""), today_dt))
 
             factor_results = rec.get("factor_results") or {}
             for factor, info in factor_results.items():
@@ -242,29 +236,10 @@ class StockWeightManager:
             accuracy = correct / total_pred if total_pred > 0 else 0
             wrong_rate = wrong / total_pred if total_pred > 0 else 0
             old_w = current_weights[factor]
-            new_w = old_w
-            reason = ""
 
-            # 调整规则（升权门槛比降权更严格，防止小样本虚高 accuracy 导致权重只升不降）
-            # 降权带下限 MIN_WEIGHT_FLOOR：原实现连续 wrong≥0.5 每次×0.5 无下限，
-            # 多次迭代后权重趋近0，而升权需 accuracy>75%+净胜≥3——低权重因子
-            # 参与评分的变化极小很难积累净胜，事实上永久"死亡"且无恢复通道
-            if wrong_rate >= 0.5:
-                new_w = max(old_w * 0.5, MIN_WEIGHT_FLOOR)
-                reason = f"wrong_rate={wrong_rate:.0%} (samples={total_pred})"
-            elif wrong_rate >= 0.3 and accuracy < 0.4:
-                new_w = max(old_w * 0.7, MIN_WEIGHT_FLOOR)
-                reason = f"wrong_rate={wrong_rate:.0%} accuracy={accuracy:.0%}"
-            elif accuracy > 0.75 and total_pred >= 10 and (correct - wrong) >= 3:
-                # 升权要求：accuracy>75% + 样本≥10 + 净胜数≥3（防止 6对1错=86% 这种小样本虚高）
-                # 恢复通道：已触底的因子只需略低的门槛即可回升，避免永久死亡
-                if old_w <= MIN_WEIGHT_FLOOR * 1.01:
-                    if accuracy > 0.65 and total_pred >= 8:
-                        new_w = min(old_w * 1.5, old_w + MAX_WEIGHT_STEP)
-                        reason = f"floor_recovery: accuracy={accuracy:.0%} (samples={total_pred})"
-                else:
-                    new_w = old_w * 1.1
-                    reason = f"accuracy={accuracy:.0%} (samples={total_pred}, net_wins={int(correct-wrong)})"
+            new_w, reason = _rule_based_new_weight(
+                old_w, accuracy=accuracy, wrong_rate=wrong_rate,
+                total_pred=total_pred, net_wins=correct - wrong)
 
             if abs(new_w - old_w) < 1e-6:
                 continue
@@ -434,3 +409,33 @@ class StockWeightManager:
             "global_weights_sum": round(sum(self.global_weights.values()), 4),
             "global_factors": len(self.global_weights),
         }
+
+
+def _rule_based_new_weight(old_w: float, accuracy: float, wrong_rate: float,
+                           total_pred: int, net_wins: float):
+    """per-stock 单因子调整规则。返回 (new_weight, reason)。
+
+    升权门槛比降权更严格，防止小样本虚高 accuracy 导致权重只升不降。
+    降权带下限 MIN_WEIGHT_FLOOR：原实现连续 wrong>=0.5 每次×0.5 无下限，
+    多次迭代后权重趋近0，而升权需 accuracy>75%+净胜>=3——低权重因子
+    参与评分的变化极小很难积累净胜，事实上永久"死亡"且无恢复通道。
+    """
+    if wrong_rate >= 0.5:
+        return max(old_w * 0.5, MIN_WEIGHT_FLOOR), \
+            f"wrong_rate={wrong_rate:.0%} (samples={total_pred})"
+    if wrong_rate >= 0.3 and accuracy < 0.4:
+        return max(old_w * 0.7, MIN_WEIGHT_FLOOR), \
+            f"wrong_rate={wrong_rate:.0%} accuracy={accuracy:.0%}"
+
+    # 升权要求：accuracy>75% + 样本>=10 + 净胜数>=3（防止 6对1错=86% 这种小样本虚高）
+    if accuracy > 0.75 and total_pred >= 10 and net_wins >= 3:
+        # 恢复通道：已触底的因子只需略低的门槛即可回升，避免永久死亡
+        if old_w <= MIN_WEIGHT_FLOOR * 1.01:
+            if accuracy > 0.65 and total_pred >= 8:
+                return min(old_w * 1.5, old_w + MAX_WEIGHT_STEP), \
+                    f"floor_recovery: accuracy={accuracy:.0%} (samples={total_pred})"
+        else:
+            return old_w * 1.1, \
+                f"accuracy={accuracy:.0%} (samples={total_pred}, net_wins={int(net_wins)})"
+
+    return old_w, ""

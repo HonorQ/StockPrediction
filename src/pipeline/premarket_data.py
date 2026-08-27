@@ -20,28 +20,24 @@ from src.pipeline.common import _pack
 
 
 def _pm_mkt(ctx):
+    """行情/外盘/指数/新闻/宏观事件/概念映射 数据获取阶段。
+
+    显式依赖注入(AGENTS.md 二节): 仅 unpack 本阶段实际消费的组件。
+    """
     (
-        a_stock_df, change, change_col, chg_60, code,
-        code_col, col_60, concept_map, concept_negative, concept_neutral,
-        concept_positive, concept_result, event, filtered_positive, global_market_cfg,
-        global_markets, hot_fetcher, icon, index_data, macro_detector,
-        macro_events, market_fetcher, news_analysis, news_factor, news_fetcher,
-        news_list, overbought_count, row, turnover, turnover_col,
+        macro_detector, market_fetcher, news_factor, news_fetcher,
+        global_market_cfg,
     ) = ctx.unpack(
-        'a_stock_df', 'change', 'change_col', 'chg_60', 'code',
-        'code_col', 'col_60', 'concept_map', 'concept_negative', 'concept_neutral',
-        'concept_positive', 'concept_result', 'event', 'filtered_positive', 'global_market_cfg',
-        'global_markets', 'hot_fetcher', 'icon', 'index_data', 'macro_detector',
-        'macro_events', 'market_fetcher', 'news_analysis', 'news_factor', 'news_fetcher',
-        'news_list', 'overbought_count', 'row', 'turnover', 'turnover_col',
+        'macro_detector', 'market_fetcher', 'news_factor', 'news_fetcher',
+        'global_market_cfg',
     )
     config = ctx["config"]
 
     print("\n[1/6] 获取A股实时行情...")
     a_stock_df = market_fetcher.get_a_share_realtime()
     if a_stock_df.empty:
-        print("  ❌ 无法获取A股行情，退出")
-        return
+        print("  ❌ 无法获取A股行情，今日premarket跳过")
+        raise SystemExit("no_a_share_data")
 
     hot_fetcher = HotStocksFetcher(market_df=a_stock_df)
 
@@ -125,18 +121,13 @@ def _pm_mkt(ctx):
     ctx["config"] = config
 
 def _pm_sent(ctx):
+    """热点/情绪/板块轮动/大盘择时预评估 + regime 权重切换阶段。"""
     (
-        _regime_info, concept_positive, global_markets, hot_codes, hot_df,
-        hot_fetcher, index_data, k, market_fetcher, news_list,
-        northbound_data, r, regime, regime_filter, regime_result,
-        regime_weights, rotation_data, scorer, sector_rotation, sentiment,
-        si_cfg, switched, v, weights,
+        concept_positive, global_markets, hot_fetcher, index_data, market_fetcher,
+        news_list, scorer, sector_rotation, weights,
     ) = ctx.unpack(
-        '_regime_info', 'concept_positive', 'global_markets', 'hot_codes', 'hot_df',
-        'hot_fetcher', 'index_data', 'k', 'market_fetcher', 'news_list',
-        'northbound_data', 'r', 'regime', 'regime_filter', 'regime_result',
-        'regime_weights', 'rotation_data', 'scorer', 'sector_rotation', 'sentiment',
-        'si_cfg', 'switched', 'v', 'weights',
+        'concept_positive', 'global_markets', 'hot_fetcher', 'index_data', 'market_fetcher',
+        'news_list', 'scorer', 'sector_rotation', 'weights',
     )
     config = ctx["config"]
 

@@ -4,6 +4,8 @@
 from src.utils.log import get_logger
 logger = get_logger()
 
+from src.utils.helpers import get_limit_pct
+
 import time
 import pandas as pd
 from datetime import datetime
@@ -38,8 +40,6 @@ class RealtimeMonitor:
         today = df.iloc[-1]
         change_pct = today.get("涨跌幅", 0) if "涨跌幅" in df.columns else today.get("pct_chg", 0)
         volume = today.get("成交量", 0) if "成交量" in df.columns else today.get("volume", 0)
-        today.get("成交额", 0) if "成交额" in df.columns else today.get("amount", 0)
-        today.get("最高", 0) if "最高" in df.columns else today.get("high", 0)
         low = today.get("最低", 0) if "最低" in df.columns else today.get("low", 0)
         close = today.get("收盘", 0) if "收盘" in df.columns else today.get("close", 0)
         open_price = today.get("开盘", 0) if "开盘" in df.columns else today.get("open", 0)
@@ -59,9 +59,10 @@ class RealtimeMonitor:
                 "time": datetime.now().strftime("%H:%M:%S"),
             })
 
-        # 2. 秒板检测
-        limit_up_price = round(pre_close * 1.1, 2)
-        limit_down_price = round(pre_close * 0.9, 2)
+        # 2. 秒板检测（涨跌停价按板块口径计算, 禁止硬编码1.1/0.9——20cm/30cm板块会误判）
+        limit_pct = get_limit_pct(stock_code)
+        limit_up_price = round(pre_close * (1 + limit_pct / 100), 2)
+        limit_down_price = round(pre_close * (1 - limit_pct / 100), 2)
         if abs(close - limit_up_price) / limit_up_price < 0.005 and abs(open_price - limit_up_price) / limit_up_price < 0.005:
             alerts.append({
                 "type": "instant_limit_up",
@@ -231,7 +232,8 @@ class RealtimeMonitor:
                 name = str(history.iloc[-1].get("名称", code))
                 alerts = self.detect_anomalies(history, code, name)
                 all_alerts.extend(alerts)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"监控{code}失败: {e}")
                 continue
 
         return all_alerts

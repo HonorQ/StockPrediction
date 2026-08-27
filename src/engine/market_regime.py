@@ -14,6 +14,9 @@ from typing import Dict, List, Optional
 import pandas as pd
 import os
 import yaml
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class MarketRegimeFilter:
@@ -47,7 +50,8 @@ class MarketRegimeFilter:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
             return config.get("regime", {})
-        except Exception:
+        except Exception as e:
+            logger.warning(f"加载regime配置失败: {e}")
             return {}
 
     def get_regime_weights(self, regime: str, base_weights: Dict[str, float]) -> Dict[str, float]:
@@ -79,8 +83,7 @@ class MarketRegimeFilter:
             else:
                 skipped.append(factor)
         if skipped:
-            import logging
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "get_regime_weights(%s): 忽略不在评分体系中的权重维度: %s",
                 regime, sorted(skipped),
             )
@@ -282,5 +285,6 @@ class MarketRegimeFilter:
                 return "below_ma20_falling"
             else:
                 return "below_ma20"
-        except Exception:
+        except Exception as e:
+            logger.warning(f"判断MA20趋势失败: {e}")
             return "unknown"

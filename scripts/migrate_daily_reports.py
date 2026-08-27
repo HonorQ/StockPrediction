@@ -7,6 +7,7 @@
   - 历史股票卡的 factors / business_profile 未落库，迁移仅还原操作建议与评分，
     推荐理由与关键因子块在历史报告中不渲染（数据不存在）
 """
+import logging
 import os
 import re
 import sys
@@ -25,7 +26,8 @@ def _to_float(v):
     try:
         txt = str(v).replace("%", "").replace("+", "").replace("元", "").strip()
         return float(txt) if txt else 0.0
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logging.warning("捕获异常已忽略(scripts/migrate_daily_reports.py:28): %s", e)
         return 0.0
 
 
@@ -35,7 +37,8 @@ def _to_float_or_none(v):
         return None
     try:
         return float(txt)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logging.warning("捕获异常已忽略(scripts/migrate_daily_reports.py:38): %s", e)
         return None
 
 
@@ -43,7 +46,8 @@ def _to_int(v):
     txt = str(v).replace("板", "").strip()
     try:
         return int(float(txt))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logging.warning("捕获异常已忽略(scripts/migrate_daily_reports.py:46): %s", e)
         return 0
 
 
@@ -84,7 +88,8 @@ def _parse_rotation(extra_txt):
     if tech_m:
         try:
             rotation["tech_strength"] = float(tech_m.group(1))
-        except ValueError:
+        except ValueError as e:
+            logging.warning("捕获异常已忽略(scripts/migrate_daily_reports.py:87): %s", e)
             pass
     return rotation or None
 

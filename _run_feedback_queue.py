@@ -18,6 +18,7 @@
   --all:  logs/phase_all.out.log
   队列:  logs/launcher.log
 """
+import logging
 import time
 import os
 import sys
@@ -44,7 +45,8 @@ def phase_done(log_path, min_age=30):
         return False
     try:
         txt = open(log_path, encoding="utf-8", errors="replace").read()
-    except Exception:
+    except Exception as e:
+        logging.warning("捕获异常已忽略(_run_feedback_queue.py:47): %s", e)
         return False
     if DONE_MARK not in txt:
         return False

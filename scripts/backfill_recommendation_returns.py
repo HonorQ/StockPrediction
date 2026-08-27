@@ -10,6 +10,7 @@ run_daily 内置的自动回填受"自然日 check_date 窗口"限制，对实�
 --all: 回填全部模式（默认仅 premarket，避免覆盖反馈训练的模拟收益）
 幂等：只更新当前为 NULL 的字段；已回填的保持原值（不覆盖，除非 --overwrite）。
 """
+import logging
 import os
 import sqlite3
 import argparse
@@ -72,7 +73,8 @@ def backfill(mode: str, overwrite: bool = False):
         trading_days = sorted(daily.keys())
         try:
             base_idx = trading_days.index(trade_date)
-        except ValueError:
+        except ValueError as e:
+            logging.warning("捕获异常已忽略(scripts/backfill_recommendation_returns.py:75): %s", e)
             continue  # 该日无行情（周末/停牌），跳过
 
         for n_days, field in WIN.items():

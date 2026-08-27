@@ -15,20 +15,132 @@ from src.data.database_const import _NumpyEncoder
 class FeedbackMixin:
     """见模块 docstring。"""
 
+    def _create_weight_ic_tables(self, conn):
+        """建表: IC 历史/全局权重域。由 _init_db 调用, 接收已开启 PRAGMA 的连接。"""
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ic_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                factor_name TEXT NOT NULL,
+                ic_value REAL NOT NULL,
+                window_days INTEGER DEFAULT 0,
+                sample_count INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ic_date ON ic_history(trade_date)
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ic_factor ON ic_history(factor_name)
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS weight_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                factor_name TEXT NOT NULL,
+                old_weight REAL,
+                new_weight REAL,
+                reason TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_wt_date ON weight_history(trade_date)
+        """)
+
+        # 个股权重变更历史（追踪每次调整的原因和幅度）
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS stock_weight_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                code TEXT NOT NULL,
+                factor_name TEXT NOT NULL,
+                old_weight REAL,
+                new_weight REAL,
+                reason TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        # 行业权重的变更历史
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sector_weight_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                industry_name TEXT NOT NULL,
+                factor_name TEXT NOT NULL,
+                old_weight REAL,
+                new_weight REAL,
+                reason TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+    def _create_stock_weight_tables(self, conn):
+        """建表: 个股与行业因子权重域(per-stock / per-sector)。由 _init_db 调用, 接收已开启 PRAGMA 的连接。"""
+
+        # 个股因子权重表：每只股票独立维护 21 维因子权重
+        # 与 weight_history（全局 factor-level）互补：本表是 per-stock 维度
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS stock_factor_weights (
+                code TEXT NOT NULL,
+                factor_name TEXT NOT NULL,
+                weight REAL NOT NULL,
+                samples INTEGER DEFAULT 0,
+                accuracy REAL DEFAULT 0,
+                last_updated TEXT,
+                PRIMARY KEY (code, factor_name)
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sfw_code ON stock_factor_weights(code)
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_swh_code_date ON stock_weight_history(code, trade_date)
+        """)
+
+        # 行业因子权重表：同行业股票共享归因数据，解决个股归因稀疏问题
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sector_factor_weights (
+                industry_name TEXT NOT NULL,
+                factor_name TEXT NOT NULL,
+                weight REAL NOT NULL,
+                samples INTEGER DEFAULT 0,
+                accuracy REAL DEFAULT 0,
+                last_updated TEXT,
+                PRIMARY KEY (industry_name, factor_name)
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sector_industry ON sector_factor_weights(industry_name)
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sector_wh_industry ON sector_weight_history(industry_name, trade_date)
+        """)
+
     def save_attribution(self, trade_date: str, code: str, name: str,
                          score: float, actual_return: float,
                          factor_results: dict, is_failure: bool = False,
                          return_horizon: int = None):
-        with self._connection() as conn:
-            conn.execute(
-                """INSERT INTO factor_attribution
-                   (trade_date, code, name, score, actual_return, is_failure,
-                    return_horizon, factor_results)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (trade_date, code, name, score, round(actual_return, 2),
-                 int(is_failure), return_horizon,
-                 json.dumps(factor_results, ensure_ascii=False, cls=_NumpyEncoder))
-            )
+        self._execute(
+            """INSERT INTO factor_attribution
+               (trade_date, code, name, score, actual_return, is_failure,
+                return_horizon, factor_results)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (trade_date, code, name, score, round(actual_return, 2),
+             int(is_failure), return_horizon,
+             json.dumps(factor_results, ensure_ascii=False, cls=_NumpyEncoder))
+        )
 
 
     def get_attribution_history(self, days: int = 365,
@@ -129,24 +241,20 @@ class FeedbackMixin:
 
     def save_weight_update(self, trade_date: str, factor_name: str,
                            old_weight: float, new_weight: float, reason: str = ""):
-        with self._connection() as conn:
-            conn.execute(
-                """INSERT INTO weight_history
-                   (trade_date, factor_name, old_weight, new_weight, reason)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (trade_date, factor_name, old_weight, new_weight, reason)
-            )
+        self._execute(
+            """INSERT INTO weight_history
+               (trade_date, factor_name, old_weight, new_weight, reason)
+               VALUES (?, ?, ?, ?, ?)""",
+            (trade_date, factor_name, old_weight, new_weight, reason)
+        )
 
 
     def get_weight_history(self, days: int = 90) -> List[Dict]:
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-            rows = conn.execute(
-                """SELECT * FROM weight_history WHERE trade_date >= ?
-                   ORDER BY trade_date DESC""", (cutoff,)
-            ).fetchall()
-        return [dict(r) for r in rows]
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        return self._fetch_all(
+            """SELECT * FROM weight_history WHERE trade_date >= ?
+               ORDER BY trade_date DESC""", (cutoff,)
+        )
 
 
     def get_latest_weights(self, today: str = None) -> Dict[str, float]:
@@ -182,59 +290,48 @@ class FeedbackMixin:
     def save_model_version(self, version: str, trained_at: str,
                            model_type: str, metrics: dict,
                            top_features: list, model_path: str):
-        with self._connection() as conn:
-            conn.execute(
-                """INSERT INTO model_versions
-                   (version, trained_at, model_type, accuracy, precision,
-                    recall, f1_score, train_samples, test_samples,
-                    top_features, model_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (version, trained_at, model_type,
-                 metrics.get("accuracy"), metrics.get("precision"),
-                 metrics.get("recall"), metrics.get("f1_score"),
-                 metrics.get("train_samples"), metrics.get("test_samples"),
-                 json.dumps(top_features, ensure_ascii=False, cls=_NumpyEncoder) if top_features else None,
-                 model_path)
-            )
+        self._execute(
+            """INSERT INTO model_versions
+               (version, trained_at, model_type, accuracy, precision,
+                recall, f1_score, train_samples, test_samples,
+                top_features, model_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (version, trained_at, model_type,
+             metrics.get("accuracy"), metrics.get("precision"),
+             metrics.get("recall"), metrics.get("f1_score"),
+             metrics.get("train_samples"), metrics.get("test_samples"),
+             json.dumps(top_features, ensure_ascii=False, cls=_NumpyEncoder) if top_features else None,
+             model_path)
+        )
 
 
     def get_latest_model_version(self) -> Dict:
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT * FROM model_versions ORDER BY id DESC LIMIT 1"
-            ).fetchone()
+        row = self._fetch_one(
+            "SELECT * FROM model_versions ORDER BY id DESC LIMIT 1"
+        )
         if not row:
             return {}
-        d = dict(row)
-        if d.get("top_features"):
-            d["top_features"] = json.loads(d["top_features"])
-        return d
+        if row.get("top_features"):
+            row["top_features"] = json.loads(row["top_features"])
+        return row
 
 
     def get_model_history(self, limit: int = 10) -> List[Dict]:
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM model_versions ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
-        result = []
+        rows = self._fetch_all(
+            "SELECT * FROM model_versions ORDER BY id DESC LIMIT ?", (limit,)
+        )
         for r in rows:
-            d = dict(r)
-            if d.get("factor_results"):
-                d["factor_results"] = json.loads(d["factor_results"])
-            result.append(d)
-        return result
+            if r.get("factor_results"):
+                r["factor_results"] = json.loads(r["factor_results"])
+        return rows
 
 
     def get_sector_weights(self, industry_name: str) -> Dict[str, float]:
         """返回该行业的 {factor_name: weight} 字典。"""
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT factor_name, weight FROM sector_factor_weights WHERE industry_name=?",
-                (industry_name,)
-            ).fetchall()
+        rows = self._fetch_all(
+            "SELECT factor_name, weight FROM sector_factor_weights WHERE industry_name=?",
+            (industry_name,)
+        )
         if not rows:
             return {}
         return {r["factor_name"]: r["weight"] for r in rows}
@@ -242,11 +339,9 @@ class FeedbackMixin:
 
     def get_all_sector_weights(self) -> Dict[str, Dict[str, float]]:
         """批量加载所有行业的权重，返回 {industry_name: {factor: weight}}"""
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT industry_name, factor_name, weight FROM sector_factor_weights"
-            ).fetchall()
+        rows = self._fetch_all(
+            "SELECT industry_name, factor_name, weight FROM sector_factor_weights"
+        )
         result: Dict[str, Dict[str, float]] = {}
         for r in rows:
             result.setdefault(r["industry_name"], {})[r["factor_name"]] = r["weight"]

@@ -62,40 +62,16 @@ from src.pipeline.premarket_finalize import (  # noqa: F401
 
 
 def _pm_init(ctx):
-    (
-        _alerts, _t0, a, ashare_factors, atr_stop,
-        capital_behavior_factor, chip_calc, circulate_factor, db, deep_research_factor,
-        dragon_tiger, expectation_pricing, filter_cfg, fundamental_factor, global_market_cfg,
-        health_note, holder_factor, hot_fetcher, hot_money_tracker, institutional_factor,
-        institutional_research, k, keywords_cfg, latest, limit_quality_factor,
-        lockup_factor, macro_detector, margin_factor, market_fetcher, money_factor,
-        money_fetcher, money_flow_continuity, national_team_factor, news_event_analyzer, news_factor,
-        news_fetcher, next_day_predictor, oversold_strategy, policy_event_factor, popularity_factor,
-        position_manager, profit_taking_detector, quant_detector, rebound_sustainability, relative_strength,
-        scorer, screener, sector_leader, sector_linkage, sector_rotation,
-        sentiment_cycle, sentiment_factor, shareholder_factor, tech_cfg, trade_cfg,
-        v, weights,
-    ) = ctx.unpack(
-        '_alerts', '_t0', 'a', 'ashare_factors', 'atr_stop',
-        'capital_behavior_factor', 'chip_calc', 'circulate_factor', 'db', 'deep_research_factor',
-        'dragon_tiger', 'expectation_pricing', 'filter_cfg', 'fundamental_factor', 'global_market_cfg',
-        'health_note', 'holder_factor', 'hot_fetcher', 'hot_money_tracker', 'institutional_factor',
-        'institutional_research', 'k', 'keywords_cfg', 'latest', 'limit_quality_factor',
-        'lockup_factor', 'macro_detector', 'margin_factor', 'market_fetcher', 'money_factor',
-        'money_fetcher', 'money_flow_continuity', 'national_team_factor', 'news_event_analyzer', 'news_factor',
-        'news_fetcher', 'next_day_predictor', 'oversold_strategy', 'policy_event_factor', 'popularity_factor',
-        'position_manager', 'profit_taking_detector', 'quant_detector', 'rebound_sustainability', 'relative_strength',
-        'scorer', 'screener', 'sector_leader', 'sector_linkage', 'sector_rotation',
-        'sentiment_cycle', 'sentiment_factor', 'shareholder_factor', 'tech_cfg', 'trade_cfg',
-        'v', 'weights',
-    )
+    """组件初始化阶段: 实例化全部因子引擎/取数器/评分器并写入 ctx。
+
+    显式依赖: 本阶段是生产者, 仅消费 config; 不做占位式 unpack。
+    """
     config = ctx["config"]
 
     print("=" * 60)
     print("  盘前模式 — 全量因子计算")
     print(f"  运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
-    _t0 = datetime.now()
 
     # 失败告警：检测历史运行异常(上次失败/长期静默)，注入报告横幅
     health_note = None
@@ -136,7 +112,7 @@ def _pm_init(ctx):
     news_event_analyzer = NewsEventAnalyzer()
     profit_taking_detector = ProfitTakingDetector()
     ashare_factors = AShareCharacteristics()
-    sentiment_cycle = SentimentCycle()
+    sentiment_cycle = SentimentCycle(config)
     hot_money_tracker = HotMoneyTracker()
     quant_detector = QuantBehaviorDetector()
     margin_factor = MarginTradingFactor()
@@ -173,6 +149,8 @@ def _pm_init(ctx):
     except Exception as e:
         print(f"  [权重合并] 跳过: {e}")
     scorer = StockScorer(weights)
+    # t0 不带下划线: _pack 排除 '_' 开头键, 收尾阶段 _pm_feedback 依赖此键计算总耗时
+    t0 = datetime.now()
     _pack(ctx, dict(locals()))
     ctx["config"] = config
 

@@ -11,9 +11,12 @@ from typing import Dict
 from datetime import datetime
 import os
 import sys
+import logging
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
+
+logger = logging.getLogger(__name__)
 
 
 class RegimeClassifier:
@@ -40,7 +43,8 @@ class RegimeClassifier:
                     with open(meta_path, "r", encoding="utf-8") as f:
                         meta = json.load(f)
                     self.feature_names = meta.get("feature_names", [])
-            except Exception:
+            except Exception as e:
+                logger.warning(f"加载模型失败: {e}")
                 self.model = None
 
     def extract_features(self, market_data: Dict) -> np.ndarray:
@@ -102,7 +106,8 @@ class RegimeClassifier:
                 "confidence": float(confidence),
                 "probabilities": probabilities,
             }
-        except Exception:
+        except Exception as e:
+            logger.warning(f"ML预测失败，使用规则预测: {e}")
             return self._fallback_predict(market_data)
 
     def _fallback_predict(self, market_data: Dict) -> Dict:
@@ -189,4 +194,5 @@ class RegimeClassifier:
                 "test_samples": len(X_test),
             }
         except Exception as e:
+            logger.warning("捕获异常已忽略(src/engine/regime_classifier.py:196): %s", e)
             return {"status": "error", "error": str(e)}

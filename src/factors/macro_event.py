@@ -7,8 +7,12 @@
   - PMI变化（经济景气度）
   - CPI变化（通胀指标）
 """
+import logging
+
 import pandas as pd
 from typing import Dict, List
+
+logger = logging.getLogger(__name__)
 
 
 class MacroEventDetector:
@@ -91,8 +95,8 @@ class MacroEventDetector:
                         "impact_score": 85,
                     })
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("LPR事件检测失败(跳过): %s", e)
 
         return events
 
@@ -155,8 +159,8 @@ class MacroEventDetector:
                     "impact_score": 55,
                 })
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("M2事件检测失败(跳过): %s", e)
 
         return events
 
@@ -231,8 +235,8 @@ class MacroEventDetector:
                         "impact_score": 60,
                     })
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("PMI事件检测失败(跳过): %s", e)
 
         return events
 
@@ -277,8 +281,8 @@ class MacroEventDetector:
                     "impact_score": 70,
                 })
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("CPI事件检测失败(跳过): %s", e)
 
         return events
 

@@ -41,7 +41,7 @@ class SectorLinkage:
             if board is not None and not board.empty:
                 concepts = board.iloc[:, 0].tolist() if board.shape[1] > 0 else []
                 return [str(c) for c in concepts[:10]]
-        except Exception:
+        except Exception as e:
             if not SectorLinkage._warned:
                 logger.info('      ⚠️ 概念板块API(push2)不可达, 暂停5分钟后自动重试')
                 SectorLinkage._warned = True
@@ -66,7 +66,7 @@ class SectorLinkage:
                         "down_count": int(row.get("下跌家数", 0)) if pd.notna(row.get("下跌家数")) else 0,
                         "lead_stock": str(row.get("领涨股", "")) if pd.notna(row.get("领涨股")) else "",
                     }
-        except Exception:
+        except Exception as e:
             if not SectorLinkage._warned:
                 logger.info('      ⚠️ 概念板块API(push2)不可达, 暂停5分钟后自动重试')
                 SectorLinkage._warned = True
@@ -131,10 +131,11 @@ class MoneyFlowContinuity:
         }
 
         try:
+            # 分层规则: 因子层数据由上层注入, 禁止自行取数(AGENTS.md 第二节)
             fetcher = self._money_fetcher
             if fetcher is None:
-                from src.data.money_flow import MoneyFlowFetcher
-                fetcher = MoneyFlowFetcher()
+                logger.warning("MoneyFlowContinuity 未注入 money_fetcher, 跳过资金流分析(%s)", stock_code)
+                return result
 
             flow_data = fetcher.get_stock_fund_flow(stock_code)
             if flow_data is None or flow_data.empty:
@@ -201,8 +202,8 @@ class MoneyFlowContinuity:
                     result["flow_signals"].append("主力资金由流出转流入（逆转信号）")
                     result["flow_continuity_score"] = 65
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[phase2_market_intel.py:205] MoneyFlowContinuity/analyze 失败(忽略): %s", e)
 
         return result
 
@@ -251,8 +252,8 @@ class InstitutionalResearch:
                 # 数据源返回空数据，跳过
                 pass
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[phase2_market_intel.py:255] InstitutionalResearch/analyze 失败(忽略): %s", e)
 
         # 机构持仓（获取全量后按代码过滤）
         try:
@@ -275,11 +276,12 @@ class InstitutionalResearch:
                                     )
                                     result["research_score"] = min(result["research_score"] + 10, 90)
                                 break
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"解析机构调研数据失败: {e}")
                     continue
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[phase2_market_intel.py:282] InstitutionalResearch/analyze 失败(忽略): %s", e)
 
         result["research_score"] = max(0, min(100, result["research_score"]))
         return result
@@ -360,7 +362,8 @@ class DragonTigerBoard:
                     self._lhb_cache[d] = df
                     self._lhb_cache_date = today_str
                     return df
-            except Exception:
+            except Exception as e:
+                logger.warning(f"获取龙虎榜数据失败: {e}")
                 continue
         return pd.DataFrame()
 
@@ -431,8 +434,8 @@ class DragonTigerBoard:
                     )
                     result["lh_score"] = max(0, min(100, result["lh_score"]))
                     return result
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[phase2_market_intel.py:435] DragonTigerBoard/analyze 失败(忽略): %s", e)
 
         # 备源：sina（也用最近交易日）
         try:
@@ -455,8 +458,8 @@ class DragonTigerBoard:
                             reason=indicator,
                         )
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[phase2_market_intel.py:459] DragonTigerBoard/analyze 失败(忽略): %s", e)
 
         result["lh_score"] = max(0, min(100, result["lh_score"]))
         return result

@@ -24,6 +24,10 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 _NO_PROXY = "*"
 os.environ["NO_PROXY"] = _NO_PROXY
 os.environ["no_proxy"] = _NO_PROXY
+# requests 会从环境变量读代理，Windows 系统代理(注册表)也会被 urllib3 检测到
+# 必须显式清除，否则东财等走代理的接口会 ProxyError 挂死
+for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+    os.environ.pop(_k, None)
 
 # 全局网络超时：防止数据源故障时请求无限挂起导致每日任务卡死
 # （2026-08-10 案例：东财 push2 连不上，industry_map 重建请求无超时挂起，盘前任务卡住）

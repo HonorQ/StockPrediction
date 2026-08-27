@@ -3,13 +3,109 @@
 
 由 database.py 机械拆分(AGENTS.md 技术债偿还): 方法体零改动。
 """
-import sqlite3
 from datetime import datetime, timedelta
+
+# K线列名映射: 中文(akshare) → 英文(标准)
+_KLINE_COL_MAP = {
+    "日期": "trade_date", "date": "trade_date",
+    "开盘": "open", "open": "open",
+    "最高": "high", "high": "high",
+    "最低": "low", "low": "low",
+    "收盘": "close", "close": "close",
+    "成交量": "volume", "volume": "volume",
+    "成交额": "amount", "amount": "amount",
+    "换手率": "turnover", "turnover": "turnover",
+    "涨跌幅": "pct_chg", "pctChg": "pct_chg",
+}
 
 
 
 class MarketMixin:
     """见模块 docstring。"""
+
+    def _create_ml_auction_tables(self, conn):
+        """建表: ML 版本/影子评分 + 日K线/竞价快照域。由 _init_db 调用, 接收已开启 PRAGMA 的连接。"""
+
+        # 日K线落库：ML_TRAINING_PLAN 关键缺口#5——原始K线此前不落库，
+        # 导致无法离线做需要重算因子的全市场回测。盘前预取后幂等写入。
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS kline_daily (
+                code TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume REAL,
+                amount REAL,
+                PRIMARY KEY (code, trade_date)
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_kline_date ON kline_daily(trade_date)
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS model_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL,
+                trained_at TEXT NOT NULL,
+                model_type TEXT,
+                accuracy REAL,
+                precision REAL,
+                recall REAL,
+                f1_score REAL,
+                train_samples INTEGER,
+                test_samples INTEGER,
+                top_features TEXT,
+                model_path TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        # 影子 ML 评分表：影子模式下 ML 模型对候选股的预测结果，与主推荐隔离
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ml_shadow_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                code TEXT NOT NULL,
+                name TEXT DEFAULT '',
+                ml_score REAL NOT NULL,
+                ml_probability REAL DEFAULT 0.5,
+                ml_prediction TEXT DEFAULT 'neutral',
+                existing_score REAL DEFAULT 50,
+                existing_rank INTEGER DEFAULT 0,
+                ml_rank INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_mss_date ON ml_shadow_scores(trade_date)
+        """)
+
+        # 集合竞价快照：9:25 盘中模式落库，为竞价强度因子积累 IC 样本
+        # (量比=竞价强度核心字段; open_pct 9:25时刻的涨跌幅即开盘涨幅)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS auction_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                code TEXT NOT NULL,
+                name TEXT DEFAULT '',
+                open_price REAL,
+                open_pct REAL,
+                volume_ratio REAL,
+                turnover REAL,
+                amount REAL,
+                captured_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_auction_date_code
+            ON auction_snapshots(trade_date, code)
+        """)
 
     def save_auction_snapshot(self, trade_date: str, rows: list) -> int:
         """批量落库竞价快照。rows: [{code,name,open_price,open_pct,volume_ratio,turnover,amount}]
@@ -31,13 +127,11 @@ class MarketMixin:
 
 
     def get_auction_snapshots(self, days: int = 120) -> list:
-        with self._connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-            rows = conn.execute(
-                "SELECT * FROM auction_snapshots WHERE trade_date >= ?"
-                " ORDER BY trade_date, volume_ratio DESC", (cutoff,)).fetchall()
-        return [dict(r) for r in rows]
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        return self._fetch_all(
+            "SELECT * FROM auction_snapshots WHERE trade_date >= ?"
+            " ORDER BY trade_date, volume_ratio DESC", (cutoff,)
+        )
 
 
     def save_klines(self, code: str, df) -> int:
@@ -45,7 +139,7 @@ class MarketMixin:
         返回写入行数；缺少日期/收盘列时返回0。"""
         if df is None or df.empty:
             return 0
-        rename = {c: self._KLINE_COL_MAP[c] for c in df.columns if c in self._KLINE_COL_MAP}
+        rename = {c: _KLINE_COL_MAP[c] for c in df.columns if c in _KLINE_COL_MAP}
         std = df.rename(columns=rename)
         for col in ("trade_date", "close"):
             if col not in std.columns:

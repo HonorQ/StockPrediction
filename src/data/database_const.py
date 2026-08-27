@@ -3,8 +3,9 @@
 
 import os
 import json
+import datetime
 class _NumpyEncoder(json.JSONEncoder):
-    """处理 numpy 类型 → JSON 序列化"""
+    """处理 numpy / datetime 类型 → JSON 序列化"""
     def default(self, o):
         import numpy as np
         if isinstance(o, (np.integer,)):
@@ -13,6 +14,8 @@ class _NumpyEncoder(json.JSONEncoder):
             return float(o)
         if isinstance(o, (np.ndarray,)):
             return o.tolist()
+        if isinstance(o, (datetime.datetime, datetime.date)):
+            return o.isoformat()
         return super().default(o)
 
 
@@ -29,5 +32,3 @@ SUB_SCORE_DIMS = [
     "policy_event", "national_team", "capital_behavior", "moat",
     "holder_concentration", "circulate_holder",
 ]
-
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "stock_history.db")

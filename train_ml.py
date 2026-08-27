@@ -64,7 +64,8 @@ def collect_training_data():
         if isinstance(factors, str):
             try:
                 factors = json.loads(factors)
-            except Exception:
+            except Exception as e:
+                logger.warning("捕获异常已忽略(train_ml.py:67): %s", e)
                 skipped += 1
                 continue
         if not isinstance(factors, dict) or not factors:
