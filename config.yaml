@@ -234,9 +234,9 @@ ashare_guard:
   min_candidates: 10
   note: 'ashare_specific弱信号排除器: 截面ashare_specific最低10%剔除(2026-08组合模拟A/B证实alpha在空头端,hold=5空头年化+8.8%/胜率60.9%)'
 us_sector_guard:
-  enabled: true
+  enabled: false
   drop_threshold: -2.0
-  note: '美股板块风控: 美股相关板块跌>2%时排除A股对应行业(2026-08全年数据分析: AI/新能源跌>2%时A股对应板块胜率<35%)'
+  note: '已禁用: 板块联动无显著相关性, 被supply_chain_guard替代(供应链有真实业务关系, lift=4-11%)'
 supply_chain_guard:
   enabled: true
   drop_threshold: -2.0
