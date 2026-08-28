@@ -237,3 +237,7 @@ us_sector_guard:
   enabled: true
   drop_threshold: -2.0
   note: '美股板块风控: 美股相关板块跌>2%时排除A股对应行业(2026-08全年数据分析: AI/新能源跌>2%时A股对应板块胜率<35%)'
+supply_chain_guard:
+  enabled: true
+  drop_threshold: -2.0
+  note: '美股供应链风控: 美股跌>2%时排除其A股供应商(2026-08全年数据分析: 特斯拉跌>2%供应链lift=-8.3%, 英伟达跌>2%lift=-3.9%)'

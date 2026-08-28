@@ -1,0 +1,817 @@
+{
+  "supply_chain": {
+    "NVDA": {
+      "name": "英伟达",
+      "a_share_suppliers": [
+        {
+          "code": "sh603186",
+          "name": "华正新材",
+          "link": "PCB覆铜板",
+          "degree": "potential"
+        },
+        {
+          "code": "sz002463",
+          "name": "沪电股份",
+          "link": "高端PCB(算力板)",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300476",
+          "name": "胜宏科技",
+          "link": "GPU显卡板/服务器板",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002916",
+          "name": "深南电路",
+          "link": "PCB/IC载板",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002036",
+          "name": "联创电子",
+          "link": "光学镜头(机器人)",
+          "degree": "potential"
+        },
+        {
+          "code": "sh600584",
+          "name": "长电科技",
+          "link": "芯片封测(CoWoS)",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002185",
+          "name": "华天科技",
+          "link": "芯片封测",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002049",
+          "name": "紫光国微",
+          "link": "特种芯片",
+          "degree": "potential"
+        },
+        {
+          "code": "sz300458",
+          "name": "全志科技",
+          "link": "AI芯片设计",
+          "degree": "potential"
+        },
+        {
+          "code": "sh688256",
+          "name": "寒武纪",
+          "link": "AI芯片(国产替代)",
+          "degree": "potential"
+        },
+        {
+          "code": "sh688041",
+          "name": "海光信息",
+          "link": "GPU(国产替代)",
+          "degree": "potential"
+        },
+        {
+          "code": "sz002241",
+          "name": "歌尔股份",
+          "link": "XR设备代工",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300433",
+          "name": "蓝思科技",
+          "link": "AI眼镜结构件",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002475",
+          "name": "立讯精密",
+          "link": "AI服务器连接器/光模块",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300308",
+          "name": "中际旭创",
+          "link": "800G光模块",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sh600487",
+          "name": "亨通光电",
+          "link": "光纤光缆",
+          "degree": "confirmed"
+        }
+      ]
+    },
+    "AAPL": {
+      "name": "苹果",
+      "a_share_suppliers": [
+        {
+          "code": "sz002475",
+          "name": "立讯精密",
+          "link": "AirPods/iPhone/Vision Pro",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002241",
+          "name": "歌尔股份",
+          "link": "AirPods/声学器件",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300433",
+          "name": "蓝思科技",
+          "link": "玻璃/金属结构件",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002600",
+          "name": "领益智造",
+          "link": "精密功能件",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300136",
+          "name": "信维通信",
+          "link": "天线/无线充电",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002456",
+          "name": "欧菲光",
+          "link": "触控/光学",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002920",
+          "name": "德赛西威",
+          "link": "智能座舱",
+          "degree": "potential"
+        },
+        {
+          "code": "sh603501",
+          "name": "韦尔股份",
+          "link": "CIS芯片",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300750",
+          "name": "宁德时代",
+          "link": "电池(苹果汽车传闻)",
+          "degree": "rumor"
+        },
+        {
+          "code": "sz002415",
+          "name": "海康威视",
+          "link": "AI视觉",
+          "degree": "potential"
+        }
+      ]
+    },
+    "TSLA": {
+      "name": "特斯拉",
+      "a_share_suppliers": [
+        {
+          "code": "sz002050",
+          "name": "三花智控",
+          "link": "旋转关节总成",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sh601689",
+          "name": "拓普集团",
+          "link": "线性/旋转执行器",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sh688017",
+          "name": "绿的谐波",
+          "link": "谐波减速器",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sh603667",
+          "name": "五洲新春",
+          "link": "行星滚柱丝杠",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sh603305",
+          "name": "旭升集团",
+          "link": "关节镁合金壳体",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300115",
+          "name": "长盈精密",
+          "link": "关节齿轮/轴承/连接器",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300750",
+          "name": "宁德时代",
+          "link": "动力电池",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300124",
+          "name": "汇川技术",
+          "link": "电驱系统",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002747",
+          "name": "埃斯顿",
+          "link": "伺服系统",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300024",
+          "name": "机器人",
+          "link": "工业机器人",
+          "degree": "potential"
+        }
+      ]
+    },
+    "AMD": {
+      "name": "AMD",
+      "a_share_suppliers": [
+        {
+          "code": "sz002185",
+          "name": "华天科技",
+          "link": "芯片封测",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sh600584",
+          "name": "长电科技",
+          "link": "芯片封测",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002049",
+          "name": "紫光国微",
+          "link": "特种芯片",
+          "degree": "potential"
+        },
+        {
+          "code": "sz300458",
+          "name": "全志科技",
+          "link": "芯片设计",
+          "degree": "potential"
+        }
+      ]
+    },
+    "MSFT": {
+      "name": "微软",
+      "a_share_suppliers": [
+        {
+          "code": "sz002475",
+          "name": "立讯精密",
+          "link": "Surface代工",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sh603019",
+          "name": "中科曙光",
+          "link": "服务器/算力",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz000977",
+          "name": "浪潮信息",
+          "link": "AI服务器",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002230",
+          "name": "科大讯飞",
+          "link": "AI应用",
+          "degree": "potential"
+        }
+      ]
+    },
+    "AMZN": {
+      "name": "亚马逊",
+      "a_share_suppliers": [
+        {
+          "code": "sz002475",
+          "name": "立讯精密",
+          "link": "连接器/服务器",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sh603019",
+          "name": "中科曙光",
+          "link": "服务器",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz000977",
+          "name": "浪潮信息",
+          "link": "AI服务器",
+          "degree": "confirmed"
+        }
+      ]
+    },
+    "META": {
+      "name": "Meta",
+      "a_share_suppliers": [
+        {
+          "code": "sz002241",
+          "name": "歌尔股份",
+          "link": "Quest代工",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300433",
+          "name": "蓝思科技",
+          "link": "AI眼镜镜片",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz002475",
+          "name": "立讯精密",
+          "link": "AI眼镜/PVG光波导",
+          "degree": "confirmed"
+        }
+      ]
+    },
+    "GOOGL": {
+      "name": "谷歌",
+      "a_share_suppliers": [
+        {
+          "code": "sz002475",
+          "name": "立讯精密",
+          "link": "Pixel代工",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300433",
+          "name": "蓝思科技",
+          "link": "手机玻璃",
+          "degree": "confirmed"
+        }
+      ]
+    },
+    "LLY": {
+      "name": "礼来",
+      "a_share_suppliers": [
+        {
+          "code": "sz300347",
+          "name": "泰格医药",
+          "link": "CRO",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sz300759",
+          "name": "康龙化成",
+          "link": "CRO",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sh603259",
+          "name": "药明康德",
+          "link": "CRO/CDMO",
+          "degree": "confirmed"
+        }
+      ]
+    },
+    "ABBV": {
+      "name": "艾伯维",
+      "a_share_suppliers": [
+        {
+          "code": "sz300347",
+          "name": "泰格医药",
+          "link": "CRO",
+          "degree": "confirmed"
+        },
+        {
+          "code": "sh603259",
+          "name": "药明康德",
+          "link": "CRO/CDMO",
+          "degree": "confirmed"
+        }
+      ]
+    }
+  },
+  "a_share_index": {
+    "sh603186": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "PCB覆铜板",
+        "degree": "potential"
+      }
+    ],
+    "sz002463": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "高端PCB(算力板)",
+        "degree": "confirmed"
+      }
+    ],
+    "sz300476": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "GPU显卡板/服务器板",
+        "degree": "confirmed"
+      }
+    ],
+    "sz002916": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "PCB/IC载板",
+        "degree": "confirmed"
+      }
+    ],
+    "sz002036": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "光学镜头(机器人)",
+        "degree": "potential"
+      }
+    ],
+    "sh600584": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "芯片封测(CoWoS)",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "AMD",
+        "us_name": "AMD",
+        "link": "芯片封测",
+        "degree": "confirmed"
+      }
+    ],
+    "sz002185": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "芯片封测",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "AMD",
+        "us_name": "AMD",
+        "link": "芯片封测",
+        "degree": "confirmed"
+      }
+    ],
+    "sz002049": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "特种芯片",
+        "degree": "potential"
+      },
+      {
+        "us_code": "AMD",
+        "us_name": "AMD",
+        "link": "特种芯片",
+        "degree": "potential"
+      }
+    ],
+    "sz300458": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "AI芯片设计",
+        "degree": "potential"
+      },
+      {
+        "us_code": "AMD",
+        "us_name": "AMD",
+        "link": "芯片设计",
+        "degree": "potential"
+      }
+    ],
+    "sh688256": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "AI芯片(国产替代)",
+        "degree": "potential"
+      }
+    ],
+    "sh688041": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "GPU(国产替代)",
+        "degree": "potential"
+      }
+    ],
+    "sz002241": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "XR设备代工",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "AAPL",
+        "us_name": "苹果",
+        "link": "AirPods/声学器件",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "META",
+        "us_name": "Meta",
+        "link": "Quest代工",
+        "degree": "confirmed"
+      }
+    ],
+    "sz300433": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "AI眼镜结构件",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "AAPL",
+        "us_name": "苹果",
+        "link": "玻璃/金属结构件",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "META",
+        "us_name": "Meta",
+        "link": "AI眼镜镜片",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "GOOGL",
+        "us_name": "谷歌",
+        "link": "手机玻璃",
+        "degree": "confirmed"
+      }
+    ],
+    "sz002475": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "AI服务器连接器/光模块",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "AAPL",
+        "us_name": "苹果",
+        "link": "AirPods/iPhone/Vision Pro",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "MSFT",
+        "us_name": "微软",
+        "link": "Surface代工",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "AMZN",
+        "us_name": "亚马逊",
+        "link": "连接器/服务器",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "META",
+        "us_name": "Meta",
+        "link": "AI眼镜/PVG光波导",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "GOOGL",
+        "us_name": "谷歌",
+        "link": "Pixel代工",
+        "degree": "confirmed"
+      }
+    ],
+    "sz300308": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "800G光模块",
+        "degree": "confirmed"
+      }
+    ],
+    "sh600487": [
+      {
+        "us_code": "NVDA",
+        "us_name": "英伟达",
+        "link": "光纤光缆",
+        "degree": "confirmed"
+      }
+    ],
+    "sz002600": [
+      {
+        "us_code": "AAPL",
+        "us_name": "苹果",
+        "link": "精密功能件",
+        "degree": "confirmed"
+      }
+    ],
+    "sz300136": [
+      {
+        "us_code": "AAPL",
+        "us_name": "苹果",
+        "link": "天线/无线充电",
+        "degree": "confirmed"
+      }
+    ],
+    "sz002456": [
+      {
+        "us_code": "AAPL",
+        "us_name": "苹果",
+        "link": "触控/光学",
+        "degree": "confirmed"
+      }
+    ],
+    "sz002920": [
+      {
+        "us_code": "AAPL",
+        "us_name": "苹果",
+        "link": "智能座舱",
+        "degree": "potential"
+      }
+    ],
+    "sh603501": [
+      {
+        "us_code": "AAPL",
+        "us_name": "苹果",
+        "link": "CIS芯片",
+        "degree": "confirmed"
+      }
+    ],
+    "sz300750": [
+      {
+        "us_code": "AAPL",
+        "us_name": "苹果",
+        "link": "电池(苹果汽车传闻)",
+        "degree": "rumor"
+      },
+      {
+        "us_code": "TSLA",
+        "us_name": "特斯拉",
+        "link": "动力电池",
+        "degree": "confirmed"
+      }
+    ],
+    "sz002415": [
+      {
+        "us_code": "AAPL",
+        "us_name": "苹果",
+        "link": "AI视觉",
+        "degree": "potential"
+      }
+    ],
+    "sz002050": [
+      {
+        "us_code": "TSLA",
+        "us_name": "特斯拉",
+        "link": "旋转关节总成",
+        "degree": "confirmed"
+      }
+    ],
+    "sh601689": [
+      {
+        "us_code": "TSLA",
+        "us_name": "特斯拉",
+        "link": "线性/旋转执行器",
+        "degree": "confirmed"
+      }
+    ],
+    "sh688017": [
+      {
+        "us_code": "TSLA",
+        "us_name": "特斯拉",
+        "link": "谐波减速器",
+        "degree": "confirmed"
+      }
+    ],
+    "sh603667": [
+      {
+        "us_code": "TSLA",
+        "us_name": "特斯拉",
+        "link": "行星滚柱丝杠",
+        "degree": "confirmed"
+      }
+    ],
+    "sh603305": [
+      {
+        "us_code": "TSLA",
+        "us_name": "特斯拉",
+        "link": "关节镁合金壳体",
+        "degree": "confirmed"
+      }
+    ],
+    "sz300115": [
+      {
+        "us_code": "TSLA",
+        "us_name": "特斯拉",
+        "link": "关节齿轮/轴承/连接器",
+        "degree": "confirmed"
+      }
+    ],
+    "sz300124": [
+      {
+        "us_code": "TSLA",
+        "us_name": "特斯拉",
+        "link": "电驱系统",
+        "degree": "confirmed"
+      }
+    ],
+    "sz002747": [
+      {
+        "us_code": "TSLA",
+        "us_name": "特斯拉",
+        "link": "伺服系统",
+        "degree": "confirmed"
+      }
+    ],
+    "sz300024": [
+      {
+        "us_code": "TSLA",
+        "us_name": "特斯拉",
+        "link": "工业机器人",
+        "degree": "potential"
+      }
+    ],
+    "sh603019": [
+      {
+        "us_code": "MSFT",
+        "us_name": "微软",
+        "link": "服务器/算力",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "AMZN",
+        "us_name": "亚马逊",
+        "link": "服务器",
+        "degree": "confirmed"
+      }
+    ],
+    "sz000977": [
+      {
+        "us_code": "MSFT",
+        "us_name": "微软",
+        "link": "AI服务器",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "AMZN",
+        "us_name": "亚马逊",
+        "link": "AI服务器",
+        "degree": "confirmed"
+      }
+    ],
+    "sz002230": [
+      {
+        "us_code": "MSFT",
+        "us_name": "微软",
+        "link": "AI应用",
+        "degree": "potential"
+      }
+    ],
+    "sz300347": [
+      {
+        "us_code": "LLY",
+        "us_name": "礼来",
+        "link": "CRO",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "ABBV",
+        "us_name": "艾伯维",
+        "link": "CRO",
+        "degree": "confirmed"
+      }
+    ],
+    "sz300759": [
+      {
+        "us_code": "LLY",
+        "us_name": "礼来",
+        "link": "CRO",
+        "degree": "confirmed"
+      }
+    ],
+    "sh603259": [
+      {
+        "us_code": "LLY",
+        "us_name": "礼来",
+        "link": "CRO/CDMO",
+        "degree": "confirmed"
+      },
+      {
+        "us_code": "ABBV",
+        "us_name": "艾伯维",
+        "link": "CRO/CDMO",
+        "degree": "confirmed"
+      }
+    ]
+  },
+  "note": "基于公开信息整理(互动平台/券商研报/公司公告), 部分有保密协议"
+}

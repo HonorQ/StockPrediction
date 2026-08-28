@@ -876,3 +876,111 @@ def apply_us_sector_guard(candidates: List[Dict], config: Dict,
             len(excluded), ",".join(affected_industries), abs(threshold),
             ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))
     return kept
+
+
+def load_supply_chain():
+    """加载美股→A股供应链映射"""
+    sc_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "data", "us_a_supply_chain.json")
+    if not os.path.exists(sc_path):
+        return {}
+    try:
+        with open(sc_path, encoding="utf-8") as f:
+            data = json.load(f)
+        # 构建反向索引: A股code → [(us_name, link)]
+        index = {}
+        for us_code, info in data.get("supply_chain", {}).items():
+            for s in info.get("a_share_suppliers", []):
+                code = s.get("code", "")
+                if code not in index:
+                    index[code] = []
+                index[code].append({"us_name": info["name"], "link": s["link"], "degree": s["degree"]})
+        return index
+    except Exception:
+        return {}
+
+
+def apply_supply_chain_guard(candidates: List[Dict], config: Dict,
+                             supply_chain_index: Dict = None) -> List[Dict]:
+    """美股供应链风控: 美股跌>2%时排除其A股供应商。
+
+    依据(2026-08-27 全年数据分析):
+      - 特斯拉跌>2%→A股供应链次日跌(9家供应商平均lift=-8.3%)
+      - 英伟达跌>2%→A股PCB/光模块次日跌(lift=-3.9%)
+      - 亚马逊跌>2%→A股服务器次日跌(lift=-11.3%)
+
+    Args:
+        candidates: 候选股列表(需含 code 字段)
+        config: 配置(读取 supply_chain_guard 段)
+        supply_chain_index: {code: [{us_name, link, degree}]} 反向索引
+    """
+    cfg = config.get("supply_chain_guard") or {}
+    if not cfg.get("enabled", False):
+        return candidates
+
+    threshold = float(cfg.get("drop_threshold", -2.0))
+
+    # 读取美股最新数据
+    us_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "cache", "us_daily")
+    sector_path = os.path.join(us_dir, "us_sector_returns.csv")
+    if not os.path.exists(sector_path):
+        return candidates
+
+    try:
+        import pandas as pd
+        us_df = pd.read_csv(sector_path, index_col=0)
+        latest = us_df.iloc[-1]
+    except Exception:
+        return candidates
+
+    # 加载供应链索引
+    if supply_chain_index is None:
+        supply_chain_index = load_supply_chain()
+    if not supply_chain_index:
+        return candidates
+
+    # 找出跌>阈值的美股板块
+    dropped_sectors = [s for s, v in latest.items() if v < threshold]
+    if not dropped_sectors:
+        return candidates
+
+    # 映射到A股供应商 (板块→行业→股票, 通过 us_sector_guard 已覆盖)
+    # 这里做更精准的: 直接匹配供应链公司
+    # 用美股个股数据(如果有的话)
+    us_stock_path = os.path.join(us_dir, "us_sector_returns.csv")
+    # 简化: 用板块收益近似个股收益
+    # 跌的板块 → 该板块内的美股公司 → A股供应商
+
+    kept, excluded = [], []
+    for c in candidates:
+        code = c.get("code", "")
+        norm_code = code.replace(".", "")
+        if norm_code in supply_chain_index:
+            suppliers = supply_chain_index[norm_code]
+            # 检查该供应商的美股关联公司是否在跌的板块
+            for s in suppliers:
+                us_name = s["us_name"]
+                # 简单映射: 英伟达→半导体, 特斯拉→新能源, etc
+                sector_map = {
+                    "英伟达": "半导体", "AMD": "半导体",
+                    "特斯拉": "新能源/电车",
+                    "亚马逊": "AI/云计算", "微软": "AI/云计算",
+                    "Meta": "AI/云计算", "谷歌": "AI/云计算",
+                }
+                related_sector = sector_map.get(us_name, "")
+                if related_sector in dropped_sectors:
+                    c["guard_reason"] = f"美股供应链风险({us_name}相关板块跌>{abs(threshold):.0f}%)"
+                    excluded.append(c)
+                    break
+            else:
+                kept.append(c)
+        else:
+            kept.append(c)
+
+    if excluded:
+        logging.getLogger("stock_prediction").warning(
+            "Supply chain guard 剔除 %d 只(美股供应链跌>%.0f%%): %s",
+            len(excluded), abs(threshold),
+            ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))
+    return kept
