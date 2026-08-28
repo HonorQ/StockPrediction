@@ -38,9 +38,17 @@ class MarketMixin:
                 close REAL,
                 volume REAL,
                 amount REAL,
+                turnover REAL,
+                pct_chg REAL,
                 PRIMARY KEY (code, trade_date)
             )
         """)
+        # 兼容旧表：ALTER TABLE 补 turnover/pct_chg 列（已存在则静默忽略）
+        for col, typ in [("turnover", "REAL"), ("pct_chg", "REAL")]:
+            try:
+                conn.execute(f"ALTER TABLE kline_daily ADD COLUMN {col} {typ}")
+            except Exception:
+                pass  # 列已存在
 
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_kline_date ON kline_daily(trade_date)
@@ -156,6 +164,8 @@ class MarketMixin:
                     float(r.get("open") or 0), float(r.get("high") or 0),
                     float(r.get("low") or 0), close_v,
                     float(r.get("volume") or 0), float(r.get("amount") or 0),
+                    float(r.get("turnover") or 0),
+                    float(r.get("pct_chg") or 0),
                 ))
             except (TypeError, ValueError):
                 continue
@@ -164,8 +174,8 @@ class MarketMixin:
         with self._connection() as conn:
             conn.executemany(
                 """INSERT OR REPLACE INTO kline_daily
-                   (code, trade_date, open, high, low, close, volume, amount)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (code, trade_date, open, high, low, close, volume, amount, turnover, pct_chg)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
         return len(rows)
@@ -176,7 +186,8 @@ class MarketMixin:
         import pandas as pd
         with self._connection() as conn:
             df = pd.read_sql_query(
-                """SELECT trade_date AS date, open, high, low, close, volume, amount
+                """SELECT trade_date AS date, open, high, low, close, volume, amount,
+                          turnover, pct_chg
                    FROM kline_daily WHERE code=? ORDER BY trade_date DESC LIMIT ?""",
                 conn, params=(code, days),
             )

@@ -72,9 +72,10 @@ class _DualOutput:
 
 
 class _NumpyEncoder(json.JSONEncoder):
-    """numpy 类型 → JSON 序列化(run_daily 同款, 缓存保存用)"""
+    """numpy 类型 + datetime → JSON 序列化(run_daily 同款, 缓存保存用)"""
     def default(self, o):
         import numpy as np
+        from datetime import datetime, date
         if isinstance(o, (np.integer,)):
             return int(o)
         if isinstance(o, (np.floating,)):
@@ -83,6 +84,10 @@ class _NumpyEncoder(json.JSONEncoder):
             return o.tolist()
         if isinstance(o, (pd.Timestamp,)):
             return str(o)
+        if isinstance(o, (datetime,)):
+            return o.isoformat()
+        if isinstance(o, (date,)):
+            return o.isoformat()
         return super().default(o)
 
 

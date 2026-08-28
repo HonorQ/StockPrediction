@@ -34,9 +34,11 @@ def _pm_guard(ctx):
     (
         db, filter_cfg, health_note, regime, regime_filter,
         regime_result, scored_stocks, screener, weights,
+        market_fetcher,
     ) = ctx.unpack(
         'db', 'filter_cfg', 'health_note', 'regime', 'regime_filter',
         'regime_result', 'scored_stocks', 'screener', 'weights',
+        'market_fetcher',
     )
     config = ctx["config"]
 
@@ -51,7 +53,8 @@ def _pm_guard(ctx):
     # === 多层风控排除(实盘/回测同口径) ===
     # alpha_overlay 已禁用(2026-08-26 组合模拟证伪多头可提取性), 不再调用
     from src.engine.scorer import (apply_chip_guard, apply_ashare_guard,
-                                    apply_us_sector_guard, apply_supply_chain_guard)
+                                    apply_us_sector_guard, apply_supply_chain_guard,
+                                    apply_oversold_rebound_guard, apply_liquidity_guard)
     scored_stocks = apply_chip_guard(scored_stocks, config)
     scored_stocks = apply_ashare_guard(scored_stocks, config)
     # 美股板块风控: 传入行业映射
@@ -59,6 +62,10 @@ def _pm_guard(ctx):
     scored_stocks = apply_us_sector_guard(scored_stocks, config, industry_map=industry_map)
     # 美股供应链风控: 美股跌>2%排除A股供应商
     scored_stocks = apply_supply_chain_guard(scored_stocks, config)
+    # oversold_rebound反向排除: 剔除截面前10%(高分位反而跌)
+    scored_stocks = apply_oversold_rebound_guard(scored_stocks, config)
+    # 流动性风控: 排除日均成交额<5000万的低流动性票
+    scored_stocks = apply_liquidity_guard(scored_stocks, config)
 
     # 信号筛选
     print("  --- 第二层: 信号强度筛选 ---")

@@ -25,9 +25,14 @@ class TechnicalFactors:
 
     def _precompute(self):
         """预计算常用指标"""
-        c = self.df["收盘"]
-        h = self.df["最高"]
-        l = self.df["最低"]
+        # 兼容中文和英文列名
+        self._close = self.df["收盘"] if "收盘" in self.df.columns else self.df["close"]
+        self._high = self.df["最高"] if "最高" in self.df.columns else self.df["high"]
+        self._low = self.df["最低"] if "最低" in self.df.columns else self.df["low"]
+        self._volume = self.df["成交量"] if "成交量" in self.df.columns else self.df["volume"]
+        c = self._close
+        h = self._high
+        l = self._low
 
         # 均线
         self.ma5 = c.rolling(5).mean()
@@ -81,7 +86,7 @@ class TechnicalFactors:
         # ---- 均线 ----
         f["ma_bullish"] = self._ma_bullish()
         f["price_vs_ma20"] = safe_divide(
-            self.df["收盘"].iloc[-1] - self.ma20.iloc[-1],
+            self._close.iloc[-1] - self.ma20.iloc[-1],
             self.ma20.iloc[-1],
         )
 
@@ -115,8 +120,8 @@ class TechnicalFactors:
     def _momentum(self, days: int) -> float:
         if len(self.df) < days + 1:
             return 0
-        now = self.df["收盘"].iloc[-1]
-        prev = self.df["收盘"].iloc[-days - 1]
+        now = self._close.iloc[-1]
+        prev = self._close.iloc[-days - 1]
         return safe_divide(now - prev, prev)
 
     # ------------------------------------------------------------------
@@ -125,7 +130,7 @@ class TechnicalFactors:
     def _momentum_decay(self, period: int = 5) -> float:
         if len(self.df) < 2 * period + 2:
             return 0.0
-        c = self.df["收盘"].values
+        c = self._close.values
         recent = c[-1] / c[-period - 1] - 1
         historical = c[-period - 1] / c[-2 * period - 1] - 1
         return max(-1.0, min(1.0, recent - historical))
@@ -162,7 +167,7 @@ class TechnicalFactors:
         lower = self.boll_lower.iloc[-1]
         if np.isnan(upper) or np.isnan(lower) or upper == lower:
             return 0.5
-        return max(0, min(1, (self.df["收盘"].iloc[-1] - lower) / (upper - lower)))
+        return max(0, min(1, (self._close.iloc[-1] - lower) / (upper - lower)))
 
     def _boll_width(self) -> float:
         """布林带宽度（越小越可能变盘）"""
@@ -185,10 +190,10 @@ class TechnicalFactors:
         if period == 20:
             high = self.high_20.iloc[-2]
         else:
-            high = self.df["最高"].rolling(period).max().iloc[-2]
+            high = self._high.rolling(period).max().iloc[-2]
         if pd.isna(high):
             return 0.0
-        return 1.0 if self.df["收盘"].iloc[-1] >= high else 0.0
+        return 1.0 if self._close.iloc[-1] >= high else 0.0
 
     # ------------------------------------------------------------------
     # 量价关系
@@ -197,22 +202,20 @@ class TechnicalFactors:
         """量价齐升"""
         if len(self.df) < 3:
             return 0
-        price_up = self.df["收盘"].iloc[-1] > self.df["收盘"].iloc[-2]
-        vol_up = self.df["成交量"].iloc[-1] > self.df["成交量"].iloc[-2] * 1.2
+        price_up = self._close.iloc[-1] > self._close.iloc[-2]
+        vol_up = self._volume.iloc[-1] > self._volume.iloc[-2] * 1.2
         return 1.0 if (price_up and vol_up) else 0.0
 
     def _volume_ratio(self, days: int = 5) -> float:
         """今日成交量 / N日均量"""
-        if len(self.df) < days + 1:
-            return 1.0
-        avg_vol = self.df["成交量"].iloc[-(days + 1):-1].mean()
-        return safe_divide(self.df["成交量"].iloc[-1], avg_vol)
+        avg_vol = self._volume.iloc[-(days + 1):-1].mean()
+        return safe_divide(self._volume.iloc[-1], avg_vol)
 
     # ------------------------------------------------------------------
     # 波动率
     # ------------------------------------------------------------------
     def _volatility(self, days: int = 20) -> float:
-        returns = self.df["收盘"].pct_change().tail(days)
+        returns = self._close.pct_change().tail(days)
         return returns.std() if not returns.empty else 0
 
     # ------------------------------------------------------------------
@@ -226,8 +229,12 @@ class TechnicalFactors:
         if len(self.df) < 2:
             return 0.5
         row = self.df.iloc[-1]
-        body = row["收盘"] - row["开盘"]
-        total = row["最高"] - row["最低"]
+        close_val = row["收盘"] if "收盘" in row.index else row["close"]
+        open_val = row["开盘"] if "开盘" in row.index else row["open"]
+        high_val = row["最高"] if "最高" in row.index else row["high"]
+        low_val = row["最低"] if "最低" in row.index else row["low"]
+        body = close_val - open_val
+        total = high_val - low_val
         if total == 0:
             return 0.5
         ratio = body / total

@@ -241,3 +241,11 @@ supply_chain_guard:
   enabled: true
   drop_threshold: -2.0
   note: '美股供应链风控: 美股跌>2%时排除其A股供应商(2026-08全年数据分析: 特斯拉跌>2%供应链lift=-8.3%, 英伟达跌>2%lift=-3.9%)'
+oversold_rebound_guard:
+  enabled: true
+  top_exclude_frac: 0.10
+  note: '超跌反弹反向排除器: 截面oversold_rebound最高10%剔除(分层Q10-Q1=-42.1bp/t=-1.98, 高分位反而跌)'
+liquidity_guard:
+  enabled: true
+  min_daily_amount_yi: 0.5
+  note: '低流动性排除器: 日均成交额<5000万的票在极端行情下无法止损(A股无做空,流动性是硬约束)'

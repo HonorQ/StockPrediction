@@ -6,6 +6,7 @@
 """
 from typing import Dict, List
 import logging
+import os
 import pandas as pd
 
 logger = logging.getLogger("stock_prediction")
@@ -982,5 +983,82 @@ def apply_supply_chain_guard(candidates: List[Dict], config: Dict,
         logging.getLogger("stock_prediction").warning(
             "Supply chain guard 剔除 %d 只(美股供应链跌>%.0f%%): %s",
             len(excluded), abs(threshold),
+            ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))
+    return kept
+
+
+def apply_oversold_rebound_guard(candidates: List[Dict], config: Dict) -> List[Dict]:
+    """oversold_rebound 反向排除器：剔除截面 oversold_rebound 最高 N% 的票。
+
+    依据(2026-08 分层分析):
+      - Q10-Q1=-42.1bp (t=-1.98), 高分位反而跌
+      - 单调性=-0.36, 方向完全反向
+      - 排除截面 oversold_rebound z-score 最高 top_exclude_frac 比例
+
+    返回过滤后的列表；被剔除项带 guard_reason 字段供日志/报告说明。
+    """
+    cfg = config.get("oversold_rebound_guard") or {}
+    if not cfg.get("enabled", False):
+        return candidates
+    exclude_frac = float(cfg.get("top_exclude_frac", 0.10))
+    min_candidates = int(cfg.get("min_candidates", 10))
+
+    if exclude_frac <= 0 or len(candidates) < min_candidates:
+        return candidates
+
+    cutoff = int(len(candidates) * exclude_frac)
+    if cutoff <= 0:
+        return candidates
+
+    sorted_cands = sorted(candidates,
+                          key=lambda x: (x.get("z_scores") or {}).get("oversold_rebound", 0) or 0,
+                          reverse=True)
+    top_codes = {c["code"] for c in sorted_cands[:cutoff]}
+
+    kept, excluded = [], []
+    for c in candidates:
+        if c.get("code") in top_codes:
+            zs = c.get("z_scores") or {}
+            z_rebound = zs.get("oversold_rebound", 0) or 0
+            c["guard_reason"] = f"oversold_rebound反向信号(z={z_rebound:.2f},截面前{exclude_frac:.0%})"
+            excluded.append(c)
+        else:
+            kept.append(c)
+
+    if excluded:
+        logging.getLogger("stock_prediction").warning(
+            "Oversold rebound guard 剔除 %d 只反向信号票(oversold_rebound前%.0f%%): %s",
+            len(excluded), exclude_frac * 100,
+            ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))
+    return kept
+
+
+def apply_liquidity_guard(candidates: List[Dict], config: Dict) -> List[Dict]:
+    """流动性风控：排除日均成交额过低的票。
+
+    依据：A股无做空机制，低流动性=无法及时止损=硬约束。
+    默认阈值 0.5 亿元（5000万），低于该值的票在极端行情下可能无法卖出。
+
+    返回过滤后的列表；被剔除项带 guard_reason 字段供日志/报告说明。
+    """
+    cfg = config.get("liquidity_guard") or {}
+    if not cfg.get("enabled", False):
+        return candidates
+    min_amount = float(cfg.get("min_daily_amount_yi", 0.5))  # 亿元
+
+    kept, excluded = [], []
+    for c in candidates:
+        factors = c.get("factors") or {}
+        avg_amount = factors.get("avg_daily_amount_20d", 0) or 0
+        if avg_amount < min_amount:
+            c["guard_reason"] = f"流动性不足({avg_amount:.2f}亿<{min_amount}亿)"
+            excluded.append(c)
+        else:
+            kept.append(c)
+
+    if excluded:
+        logging.getLogger("stock_prediction").warning(
+            "Liquidity guard 剔除 %d 只低流动性票(<%.2f亿): %s",
+            len(excluded), min_amount,
             ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))
     return kept

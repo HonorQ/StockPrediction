@@ -476,6 +476,16 @@ class BacktestEngine:
                 excluded_codes = {s["stock_code"] for s in by_ashare[:exclude_n]}
                 qualified = [s for s in qualified if s["stock_code"] not in excluded_codes]
 
+            # oversold_rebound_guard: 排除截面 oversold_rebound z-score 最高 10%(与实盘同口径)
+            # 依据: 2026-08 分层分析, Q10-Q1=-42.1bp/t=-1.98, 高分位反而跌
+            if len(qualified) >= 10:
+                exclude_n = max(1, int(len(qualified) * 0.10))
+                by_rebound = sorted(qualified,
+                                   key=lambda x: (x.get("z_scores") or {}).get("oversold_rebound", 0) or 0,
+                                   reverse=True)
+                excluded_codes = {s["stock_code"] for s in by_rebound[:exclude_n]}
+                qualified = [s for s in qualified if s["stock_code"] not in excluded_codes]
+
             picks = qualified[:top_n]
 
             held_codes = {p["code"] for p in open_positions}

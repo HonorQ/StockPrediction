@@ -26,10 +26,11 @@ _TX_KLINE_FIELDS = "date,open,high,low,close,volume,amount"
 class KlineFetcher:
     """历史K线获取 + 换手率补充"""
 
-    def __init__(self, cache_get=None, cache_put=None, cache_ts_put=None):
+    def __init__(self, cache_get=None, cache_put=None, cache_ts_put=None, db=None):
         self._cache_get = cache_get or (lambda k: None)
         self._cache_put = cache_put or (lambda k, v: None)
         self._cache_ts_put = cache_ts_put or (lambda k, v: None)
+        self._db = db
         self._turnover_warned = False
 
     def _fetch_tencent_kline(
@@ -176,6 +177,12 @@ class KlineFetcher:
         if df is None or df.empty:
             return None
         df = self._supplement_turnover(clean, df, days)
+        # 写入本地数据库（增量同步）
+        if self._db is not None and not df.empty:
+            try:
+                self._db.save_klines(clean, df)
+            except Exception as e:
+                logger.debug("K线写入本地DB失败(%s): %s", clean, e)
         return df
 
     _TURN_CACHE_TTL = 7 * 86400

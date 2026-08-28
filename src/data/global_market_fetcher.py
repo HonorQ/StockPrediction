@@ -22,7 +22,7 @@ except Exception as e:
 
 # 外盘代码映射: 中文名 → 腾讯代码
 _GLOBAL_MAP = {
-    "道琼斯": "us.DJIA", "标普500": "us.SPX", "纳斯达克": "us.NDX",
+    "道琼斯": "us.DJI", "标普500": "us.SPX", "纳斯达克": "us.IXIC",
     "恒生指数": "hk.HSI", "日经225": "jpi.N225", "富时100": "uk.FTSE",
     "纽约原油": "hf.CL", "纽约黄金": "hf.GC",
 }
@@ -48,7 +48,7 @@ class GlobalMarketFetcher:
         for m in config_markets:
             name = m.get("name", "")
             if name in _GLOBAL_MAP:
-                needed[_GLOBAL_MAP[name][0]] = name
+                needed[_GLOBAL_MAP[name]] = name
 
         if needed:
             fetched = self._fetch_tencent(list(needed.keys()))
@@ -119,17 +119,27 @@ class GlobalMarketFetcher:
                     continue
                 try:
                     if key.startswith("hf"):
+                        # 期货格式: 用逗号分隔
                         p = raw.split(",")
                         if len(p) >= 2:
                             result[key] = (float(p[0]), float(p[1]))
-                    elif key.startswith("s_us"):
+                    elif key.startswith("us.") or key.startswith("s_us"):
+                        # 美股格式: 用波浪号分隔
+                        # 字段3=最新价, 字段4=开盘价, 字段5=昨收价
+                        # 需要计算涨跌幅 = (最新价-昨收价)/昨收价*100
                         p = raw.split("~")
                         if len(p) >= 6:
-                            result[key] = (float(p[3]), float(p[5]))
-                    elif key.startswith("r_hk"):
+                            price = float(p[3])
+                            prev_close = float(p[5])
+                            change_pct = (price - prev_close) / prev_close * 100 if prev_close else 0.0
+                            result[key] = (price, round(change_pct, 2))
+                    elif key.startswith("hk.") or key.startswith("r_hk"):
+                        # 港股格式: 用波浪号分隔
+                        # 字段3=最新价, 字段4=昨收价
                         p = raw.split("~")
                         if len(p) >= 5:
-                            price, prev = float(p[3]), float(p[4])
+                            price = float(p[3])
+                            prev = float(p[4])
                             pct = (price - prev) / prev * 100 if prev else 0.0
                             result[key] = (price, round(pct, 2))
                 except (ValueError, IndexError):

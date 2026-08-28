@@ -69,6 +69,7 @@ class MarketDataFetcher:
         self._cache_ts: Dict[str, float] = {}
         self._warned_bs = False
         self._industry_map: Optional[Dict[str, str]] = None
+        self._db = None  # 延迟初始化: 本地K线数据库
 
     # === 委托方法: 逻辑已拆至独立模块, 此处保持向后兼容接口 ===
 
@@ -97,9 +98,30 @@ class MarketDataFetcher:
         return fetcher.get_index_realtime()
 
     def get_stock_history(self, code, days=120):
-        """历史K线获取: 腾讯→新浪→baostock 三源 failover"""
-        fetcher = KlineFetcher(cache_get=self._cache_get, cache_put=self._cache_put,
-                               cache_ts_put=lambda k, v: self._cache_ts.__setitem__(k, v))
+        """历史K线获取: 本地DB优先 → 腾讯→新浪→baostock 三源 failover"""
+        clean = "".join(ch for ch in str(code) if ch.isdigit())
+        # 先查本地数据库（当日数据足够新则直接返回）
+        try:
+            if self._db is None:
+                from src.data.database import StockDatabase
+                self._db = StockDatabase()
+            with self._db._connection() as conn:
+                cur = conn.execute(
+                    "SELECT MAX(trade_date) FROM kline_daily WHERE code=?", (clean,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    from datetime import datetime as _dt
+                    today = _dt.now().strftime("%Y-%m-%d")
+                    if row[0] >= today:
+                        return self._db.get_klines(clean, days)
+        except Exception:
+            pass  # 本地查询失败，继续走网络
+        # 本地无最新数据，走网络（获取后自动写入DB）
+        fetcher = KlineFetcher(
+            cache_get=self._cache_get, cache_put=self._cache_put,
+            cache_ts_put=lambda k, v: self._cache_ts.__setitem__(k, v),
+            db=self._db
+        )
         return fetcher.get_stock_history(code, days=days)
 
     def _fetch_tencent_quotes(self, codes):

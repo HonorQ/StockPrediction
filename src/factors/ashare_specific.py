@@ -21,25 +21,61 @@ class AShareCharacteristics:
         计算A股特色因子
         df: 个股历史数据
         market_sentiment: 市场情绪数据
+        
+        子因子IC分析结论(2026-08-28, 全市场102只股票):
+        - position_score: IC=+0.0888, ICIR=+1.98 → 正向有效, 权重45%
+        - mean_reversion_score: IC=+0.0357(取反后) → 正向有效, 权重30%
+        - turnover_ratio: IC=-0.0083 → 取反使用, 权重15%
+        - volatility_score: IC=+0.0218 → 正向弱, 权重10%
         """
         factors = {}
 
         limit_pct = get_limit_pct(code, name)
 
-        # 1. 均值回归因子（A股震荡市最有效）
-        factors.update(self._mean_reversion_factor(df))
+        # 1. 均值回归因子（IC分析显示负向有效，取反使用）
+        raw_mean_rev = self._mean_reversion_factor(df)
+        factors.update(raw_mean_rev)
+        if "mean_reversion_score" in factors:
+            # 取反：原分数越高=超买越严重=应该减分
+            factors["mean_reversion_score"] = 100 - factors["mean_reversion_score"]
+            # 同步修改信号方向
+            orig_signal = factors.get("reversion_signal", "neutral")
+            if orig_signal == "strong_buy":
+                factors["reversion_signal"] = "strong_sell"
+            elif orig_signal == "buy":
+                factors["reversion_signal"] = "sell"
+            elif orig_signal == "strong_sell":
+                factors["reversion_signal"] = "strong_buy"
+            elif orig_signal == "sell":
+                factors["reversion_signal"] = "buy"
 
-        # 2. 波动率因子（A股波动大）
+        # 2. 波动率因子
         factors.update(self._volatility_factor(df))
 
-        # 3. 换手率异动（游资行为）
-        factors.update(self._turnover_anomaly(df))
+        # 3. 换手率异动（IC负向，取反使用）
+        raw_turnover = self._turnover_anomaly(df)
+        factors.update(raw_turnover)
+        if "turnover_ratio" in factors:
+            # 取反：原ratio越高=换手率异常高=应该减分
+            # turnover_ratio是当前/20日均值，>1表示放量
+            # IC为负说明放量不好，取反后放量扣分
+            factors["turnover_ratio_score"] = 100 - min(factors.get("turnover_ratio", 1) * 30, 50)
 
-        # 4. 涨跌停统计（情绪指标，按板块口径）
-        factors.update(self._limit_stats(df, limit_pct=limit_pct))
+        # 4. 涨跌停统计（pct_chg数据缺失，暂不计算）
+        # factors.update(self._limit_stats(df, limit_pct=limit_pct))
 
-        # 5. 价格位置（3000点附近特殊处理）
+        # 5. 价格位置（IC正向有效）
         factors.update(self._price_position_factor(df))
+
+        # === 加权合成最终ashare_specific评分 ===
+        pos_score = factors.get("position_score", 50)
+        mr_score = factors.get("mean_reversion_score", 50)
+        turn_score = factors.get("turnover_ratio_score", 50)
+        vol_score = factors.get("volatility_score", 50)
+        
+        # 加权平均: position(45%) + mean_reversion(30%) + turnover(15%) + volatility(10%)
+        final_score = pos_score * 0.45 + mr_score * 0.30 + turn_score * 0.15 + vol_score * 0.10
+        factors["ashare_specific_score"] = round(final_score, 1)
 
         return factors
 

@@ -7,6 +7,8 @@
 3. 评分分布是否正常
 4. 异常告警
 
+注意: 只统计实盘推荐(premarket/afternoon), 排除回测推荐(backtest/backtest_invert/feedback_training)
+
 用法: python scripts/weekly_health_check.py
 """
 import os, sys, json, sqlite3
@@ -19,6 +21,9 @@ REPORTS = os.path.join(ROOT, "reports")
 # 阈值
 WINRATE_THRESHOLD = 45.0  # 低于此值触发告警
 ALERT_CONSECUTIVE_MONTHS = 2  # 连续N个月低于阈值触发审查
+
+# 实盘模式（排除回测模式）
+LIVE_MODES = "('premarket', 'afternoon')"
 
 
 def main():
@@ -34,14 +39,14 @@ def main():
     alerts = []
 
     # 1. 最近30天推荐胜率
-    print("\n1. 最近30天推荐胜率")
-    cur.execute("""
+    print("\n1. 最近30天实盘推荐胜率")
+    cur.execute(f"""
         SELECT COUNT(*) total,
                SUM(CASE WHEN d5_return > 0 THEN 1 ELSE 0 END) wins,
                AVG(d5_return) avg_d5,
                AVG(d3_return) avg_d3
         FROM recommendations
-        WHERE mode = 'premarket' AND d5_return IS NOT NULL
+        WHERE mode IN {LIVE_MODES} AND d5_return IS NOT NULL
           AND trade_date >= date('now', '-30 days')
     """)
     r = cur.fetchone()
@@ -55,13 +60,13 @@ def main():
         print("  ⚠️ 最近30天无推荐数据")
 
     # 2. 最近7天
-    print("\n2. 最近7天推荐胜率")
-    cur.execute("""
+    print("\n2. 最近7天实盘推荐胜率")
+    cur.execute(f"""
         SELECT COUNT(*) total,
                SUM(CASE WHEN d5_return > 0 THEN 1 ELSE 0 END) wins,
                AVG(d5_return) avg_d5
         FROM recommendations
-        WHERE mode = 'premarket' AND d5_return IS NOT NULL
+        WHERE mode IN {LIVE_MODES} AND d5_return IS NOT NULL
           AND trade_date >= date('now', '-7 days')
     """)
     r = cur.fetchone()
@@ -73,14 +78,14 @@ def main():
         print("  ⚠️ 最近7天无推荐数据")
 
     # 3. 月度胜率趋势
-    print("\n3. 月度胜率趋势")
-    cur.execute("""
+    print("\n3. 月度实盘推荐胜率趋势")
+    cur.execute(f"""
         SELECT substr(trade_date, 1, 7) month,
                COUNT(*) total,
                SUM(CASE WHEN d5_return > 0 THEN 1 ELSE 0 END) wins,
                AVG(d5_return) avg_d5
         FROM recommendations
-        WHERE mode = 'premarket' AND d5_return IS NOT NULL
+        WHERE mode IN {LIVE_MODES} AND d5_return IS NOT NULL
           AND trade_date >= date('now', '-6 months')
         GROUP BY month
         ORDER BY month
@@ -98,12 +103,12 @@ def main():
         alerts.append(f"最近{len(rows)}月中有{low_months}月胜率低于{WINRATE_THRESHOLD}%, 需审查因子")
 
     # 4. 评分分布
-    print("\n4. 最近一天评分分布")
-    cur.execute("""
+    print("\n4. 最近一天实盘推荐评分分布")
+    cur.execute(f"""
         SELECT score, COUNT(*) cnt
         FROM recommendations
-        WHERE mode = 'premarket'
-          AND trade_date = (SELECT MAX(trade_date) FROM recommendations WHERE mode='premarket')
+        WHERE mode IN {LIVE_MODES}
+          AND trade_date = (SELECT MAX(trade_date) FROM recommendations WHERE mode IN {LIVE_MODES})
         GROUP BY score
         ORDER BY score DESC
     """)

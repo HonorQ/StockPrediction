@@ -61,7 +61,7 @@ class ConceptMap:
         if not force and os.path.exists(self.sync_cache_path):
             try:
                 mtime = os.path.getmtime(self.sync_cache_path)
-                if (time.time() - mtime) < 7 * 86400:
+                if (time.time() - mtime) < 30 * 86400:
                     return False  # 缓存未过期
             except Exception as e:
                 logger.warning("[concept_map.py:66] ConceptMap/maybe_sync_from_akshare 失败(忽略): %s", e)
