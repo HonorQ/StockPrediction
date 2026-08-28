@@ -783,3 +783,96 @@ def apply_ashare_guard(candidates: List[Dict], config: Dict) -> List[Dict]:
             len(excluded), exclude_frac * 100,
             ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))
     return kept
+
+
+# 美股板块→A股行业映射(风控用)
+_US_SECTOR_MAP = {
+    "半导体": ["电子信息", "电子器件"],
+    "液冷/服务器": ["电子信息", "机械行业"],
+    "光通信/CPO": ["电子信息"],
+    "AI/云计算": ["电子信息", "机械行业"],
+    "新能源/电车": ["电力行业", "发电设备", "汽车制造"],
+    "金融": ["金融行业"],
+}
+
+
+def apply_us_sector_guard(candidates: List[Dict], config: Dict,
+                          industry_map: Dict[str, str] = None) -> List[Dict]:
+    """美股板块风控排除器: 美股相关板块跌>2%时, 排除A股对应行业。
+
+    依据(2026-08-27 全年数据分析 reports/us_a_sector_correlation.json):
+      - AI/云计算跌>2%→A股电子信息次日+0.39%/胜率55%(vs涨时+1.93%/73%)
+      - 新能源/电车跌>2%→A股发电设备次日-1.97%/胜率26%
+      - 金融跌>2%→A股金融行业次日-1.34%/胜率0%
+      极端行情下美股→A股板块联动显著, 常规行情无相关性。
+
+    Args:
+        candidates: 候选股列表(需含 code/name 字段)
+        config: 配置(读取 us_sector_guard 段)
+        industry_map: {code: industry} 映射, None 时从 market_data 获取
+    """
+    cfg = config.get("us_sector_guard") or {}
+    if not cfg.get("enabled", False):
+        return candidates
+
+    threshold = float(cfg.get("drop_threshold", -2.0))
+    lookback_hours = int(cfg.get("lookback_hours", 12))
+
+    # 读取美股板块最新数据
+    import os
+    us_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "cache", "us_daily")
+    sector_path = os.path.join(us_dir, "us_sector_returns.csv")
+    if not os.path.exists(sector_path):
+        return candidates
+
+    try:
+        import pandas as pd
+        us_df = pd.read_csv(sector_path, index_col=0)
+        latest = us_df.iloc[-1]  # 最新一天
+    except Exception:
+        return candidates
+
+    # 找出跌幅超阈值的板块
+    dropped_sectors = [s for s, v in latest.items() if v < threshold]
+    if not dropped_sectors:
+        return candidates
+
+    # 映射到A股行业
+    affected_industries = set()
+    for sector in dropped_sectors:
+        if sector in _US_SECTOR_MAP:
+            affected_industries.update(_US_SECTOR_MAP[sector])
+
+    if not affected_industries:
+        return candidates
+
+    # 获取行业映射
+    if industry_map is None:
+        try:
+            industry_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))), "data", "industry_map.json")
+            with open(industry_path, encoding="utf-8") as f:
+                industry_map = json.load(f)
+        except Exception:
+            return candidates
+
+    # 排除受影响行业的股票
+    kept, excluded = [], []
+    for c in candidates:
+        code = c.get("code", "")
+        # 标准化代码格式
+        norm_code = code.replace(".", "")
+        industry = industry_map.get(norm_code, "")
+        if industry in affected_industries:
+            c["guard_reason"] = f"美股板块风险({','.join(dropped_sectors)}跌>{abs(threshold):.0f}%)"
+            excluded.append(c)
+        else:
+            kept.append(c)
+
+    if excluded:
+        logging.getLogger("stock_prediction").warning(
+            "US sector guard 剔除 %d 只(%s行业, 美股跌>%.0f%%): %s",
+            len(excluded), ",".join(affected_industries), abs(threshold),
+            ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))
+    return kept
