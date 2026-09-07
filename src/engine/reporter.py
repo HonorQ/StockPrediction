@@ -641,8 +641,10 @@ class ReportGenerator:
                 d3 = f'{h.get("d3_return", 0):+.1f}%' if h.get("d3_return") is not None else "-"
                 d5 = f'{h.get("d5_return", 0):+.1f}%' if h.get("d5_return") is not None else "-"
                 d10 = f'{h.get("d10_return", 0):+.1f}%' if h.get("d10_return") is not None else "-"
-                d1_cls = "up" if h.get("d1_return", 0) and h["d1_return"] > 0 else ("down" if h.get("d1_return", 0) and h["d1_return"] < 0 else "flat")
-                d3_cls = "up" if h.get("d3_return", 0) and h["d3_return"] > 0 else ("down" if h.get("d3_return", 0) and h["d3_return"] < 0 else "flat")
+                d1_cls = "up" if h.get("d1_return") is not None and h["d1_return"] > 0 else ("down" if h.get("d1_return") is not None and h["d1_return"] < 0 else "flat")
+                d3_cls = "up" if h.get("d3_return") is not None and h["d3_return"] > 0 else ("down" if h.get("d3_return") is not None and h["d3_return"] < 0 else "flat")
+                d5_cls = "up" if h.get("d5_return") is not None and h["d5_return"] > 0 else ("down" if h.get("d5_return") is not None and h["d5_return"] < 0 else "flat")
+                d10_cls = "up" if h.get("d10_return") is not None and h["d10_return"] > 0 else ("down" if h.get("d10_return") is not None and h["d10_return"] < 0 else "flat")
                 rows.append(
                     f'<tr><td>{_html.escape(str(h.get("trade_date", "")))}</td>'
                     f'<td>{_html.escape(str(h.get("code", "")))}</td>'
@@ -650,7 +652,8 @@ class ReportGenerator:
                     f'<td>{_html.escape(str(h.get("score", "")))}</td>'
                     f'<td class="{d1_cls}">{d1}</td>'
                     f'<td class="{d3_cls}">{d3}</td>'
-                    f'<td>{d5}</td><td>{d10}</td></tr>'
+                    f'<td class="{d5_cls}">{d5}</td>'
+                    f'<td class="{d10_cls}">{d10}</td></tr>'
                 )
         return f"""
 <section class="sec">历史推荐回顾</section>
