@@ -60,6 +60,7 @@ class ReportGenerator:
         history_records: List[Dict] = None,
         intraday_note: str = None,
         report_role: str = None,
+        yesterday_tracking: List[Dict] = None,
     ) -> str:
         """生成完整HTML推荐报告
 
@@ -68,6 +69,15 @@ class ReportGenerator:
                 并在头部插入黄色提示横幅。
             report_role: 报告身份(research=盘前研究池/warning=盘中预警/final=尾盘最终决策)，
                 提供时覆盖标题后缀与横幅样式，明确各时点报告的决策地位。
+            yesterday_tracking: 昨日推荐跟踪列表，每项包含:
+                - code: 股票代码
+                - name: 股票名称
+                - yesterday_score: 昨日评分
+                - yesterday_price: 昨日推荐价格
+                - current_price: 当前价格
+                - change_pct: 今日涨跌幅(%)
+                - action: 操作建议(持有/关注/淘汰)
+                - reason: 操作理由
         """
         role = self.REPORT_ROLES.get(report_role) if report_role else None
         trade_cfg = trade_config or {}
@@ -83,8 +93,8 @@ class ReportGenerator:
         sections.append(self._build_market(market_overview))
         sections.append(self._build_global(global_markets))
         sections.append(self._build_sentiment(sentiment, rotation_data))
+        sections.append(self._build_yesterday_tracking(yesterday_tracking))
         sections.append(self._build_recommendations(recommendations, stop_loss_pct, take_profit_pct))
-        sections.append(self._build_news(news_analysis))
         sections.append(self._build_history(history_records))
         sections.append(self._build_footer())
         sections.append("</body></html>")
@@ -533,6 +543,77 @@ class ReportGenerator:
         self._row_builder._factor_rows_event(factors, add)
 
     # ------------------------------------------------------------------
+    # 昨日推荐跟踪
+    # ------------------------------------------------------------------
+    def _build_yesterday_tracking(self, tracking_data: List[Dict]) -> str:
+        """构建昨日推荐跟踪段落，展示每只股票的今日表现和操作建议。"""
+        if not tracking_data:
+            return ""
+
+        rows = []
+        for item in tracking_data:
+            code = _html.escape(str(item.get("code", "")))
+            name = _html.escape(str(item.get("name", "")))
+            yesterday_score = item.get("yesterday_score", "")
+            yesterday_price = item.get("yesterday_price", 0)
+            current_price = item.get("current_price", 0)
+            change_pct = item.get("change_pct", 0)
+            action = item.get("action", "持有")
+            reason = _html.escape(str(item.get("reason", "")))
+
+            # 涨跌幅样式
+            if change_pct > 0:
+                change_cls = "up"
+                change_str = f"+{change_pct:.2f}%"
+            elif change_pct < 0:
+                change_cls = "down"
+                change_str = f"{change_pct:.2f}%"
+            else:
+                change_cls = "flat"
+                change_str = "0.00%"
+
+            # 操作建议样式
+            action_cls = {
+                "持有": "action-hold",
+                "关注": "action-watch",
+                "淘汰": "action-discard"
+            }.get(action, "action-hold")
+
+            rows.append(
+                f'<tr>'
+                f'<td>{code}</td>'
+                f'<td>{name}</td>'
+                f'<td>{yesterday_score}</td>'
+                f'<td>{yesterday_price:.2f}</td>'
+                f'<td>{current_price:.2f}</td>'
+                f'<td class="{change_cls}">{change_str}</td>'
+                f'<td><span class="{action_cls}">{action}</span></td>'
+                f'<td>{reason}</td>'
+                f'</tr>'
+            )
+
+        return f"""
+<section class="sec">昨日推荐跟踪</section>
+<div class="card">
+  <div class="tracking-note">以下为昨日推荐股票的今日表现和操作建议，仅供参考。</div>
+  <table>
+    <thead>
+      <tr>
+        <th>代码</th>
+        <th>名称</th>
+        <th>昨日评分</th>
+        <th>昨日价格</th>
+        <th>当前价格</th>
+        <th>今日涨跌</th>
+        <th>操作建议</th>
+        <th>理由</th>
+      </tr>
+    </thead>
+    <tbody>{"".join(rows)}</tbody>
+  </table>
+</div>"""
+
+    # ------------------------------------------------------------------
     # 历史推荐
     # ------------------------------------------------------------------
     def _build_history(self, history_records: List[Dict]) -> str:
@@ -589,20 +670,412 @@ class ReportGenerator:
 </div>"""
 
     # ------------------------------------------------------------------
-    def save_report(self, content: str, filename: str = None) -> str:
-        """保存报告到HTML文件。
-        相对路径基于项目根目录解析，不再依赖进程 CWD
-        （计划任务/CWD 不同的场景会把报告写到别处）。"""
-        if filename is None:
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            filename = os.path.join("reports", "daily", f"{date_str}.html")
-        if not os.path.isabs(filename):
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            filename = os.path.join(project_root, filename)
+    def save_report(self, content: str, filename: str = None, report_role: str = None,
+                    recommendations: List[Dict] = None, **kwargs) -> str:
+        """保存报告到HTML文件，并更新汇总报告。
 
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(content)
+        方案B实现：单文件模式
+        - 最新推荐完整展示在 index.html
+        - 历史推荐以摘要表格形式保存
 
-        logger.info(f'  ✅ 报告已保存: {filename}')
-        return filename
+        Args:
+            content: 完整的HTML报告内容
+            filename: 自定义文件名（单文件模式下忽略）
+            report_role: 报告类型(research/warning/final)
+            recommendations: 推荐列表，用于生成摘要
+            **kwargs: 其他参数（市场数据等，用于历史记录）
+
+        Returns:
+            报告文件路径（index.html）
+        """
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        index_path = os.path.join(project_root, "reports", "daily", "index.html")
+        history_path = os.path.join(project_root, "reports", "daily", "history.json")
+        os.makedirs(os.path.dirname(index_path), exist_ok=True)
+
+        # 1. 加载历史数据
+        history = self._load_history(history_path)
+
+        # 2. 生成当前报告的摘要
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M")
+        weekday = "一二三四五六日"[now.weekday()]
+
+        role_names = {
+            "research": "盘前研究池",
+            "warning": "盘中预警",
+            "final": "每日推荐"
+        }
+        role_name = role_names.get(report_role, "报告")
+
+        # 推荐股票摘要
+        stock_summary = []
+        if recommendations:
+            for r in recommendations[:5]:
+                stock_summary.append({
+                    "code": r.get("code", ""),
+                    "name": r.get("name", ""),
+                    "score": r.get("score", 0),
+                    "price": r.get("current_price", 0),
+                })
+
+        new_entry = {
+            "date": date_str,
+            "time": time_str,
+            "weekday": weekday,
+            "role": role_name,
+            "role_key": report_role or "unknown",
+            "stocks": stock_summary,
+            "content": content,  # 保存完整HTML内容
+        }
+
+        # 3. 插入到历史最前面（最新的在上面）
+        history.insert(0, new_entry)
+
+        # 4. 限制历史记录数量（保留最近30天）
+        max_history = 30
+        if len(history) > max_history:
+            history = history[:max_history]
+
+        # 5. 保存历史数据
+        self._save_history(history_path, history)
+
+        # 6. 生成单文件HTML
+        index_html = self._build_single_file_html(history)
+
+        with open(index_path, "w", encoding="utf-8") as f:
+            f.write(index_html)
+
+        logger.info(f'  ✅ 报告已保存: {index_path}')
+        return index_path
+
+    def _load_history(self, history_path: str) -> List[Dict]:
+        """加载历史数据"""
+        import json
+        if not os.path.exists(history_path):
+            return []
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"加载历史数据失败: {e}")
+            return []
+
+    def _save_history(self, history_path: str, history: List[Dict]) -> None:
+        """保存历史数据"""
+        import json
+        with open(history_path, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _fmt_return_cell(value) -> str:
+        """格式化收益率为 HTML 单元格（平均值）"""
+        if value is None:
+            return '<span class="return-flat">-</span>'
+        if value > 0:
+            return f'<span class="return-up">+{value:.2f}%</span>'
+        elif value < 0:
+            return f'<span class="return-down">{value:.2f}%</span>'
+        return f'<span class="return-flat">{value:.2f}%</span>'
+
+    @staticmethod
+    def _fmt_return_inline(value) -> str:
+        """格式化收益率为内联文本"""
+        if value is None:
+            return '<span class="return-flat">-</span>'
+        if value > 0:
+            return f'<span class="return-up">+{value:.1f}%</span>'
+        elif value < 0:
+            return f'<span class="return-down">{value:.1f}%</span>'
+        return f'<span class="return-flat">{value:.1f}%</span>'
+
+    def _build_single_file_html(self, history: List[Dict]) -> str:
+        """生成单文件HTML：最新推荐完整展示 + 历史摘要表格（含收益率）"""
+        role_names = {
+            "research": "盘前研究池",
+            "warning": "盘中预警",
+            "final": "每日推荐"
+        }
+
+        # 最新推荐的完整内容
+        latest_content = ""
+        if history:
+            latest_content = history[0].get("content", "")
+
+        # 历史摘要表格（从第2条开始）
+        history_rows = ""
+        for idx, entry in enumerate(history[1:]):
+            role_key = entry.get("role_key", "unknown")
+            role_name = entry.get("role", role_names.get(role_key, "报告"))
+            date = entry.get("date", "")
+            time = entry.get("time", "")
+            weekday = entry.get("weekday", "")
+            stocks = entry.get("stocks", [])
+
+            # 计算平均收益率
+            d1_returns = [s["d1_return"] for s in stocks if s.get("d1_return") is not None]
+            d3_returns = [s["d3_return"] for s in stocks if s.get("d3_return") is not None]
+            d5_returns = [s["d5_return"] for s in stocks if s.get("d5_return") is not None]
+            rtd_returns = [s["return_to_date"] for s in stocks if s.get("return_to_date") is not None]
+
+            avg_d1 = sum(d1_returns) / len(d1_returns) if d1_returns else None
+            avg_d3 = sum(d3_returns) / len(d3_returns) if d3_returns else None
+            avg_d5 = sum(d5_returns) / len(d5_returns) if d5_returns else None
+            avg_rtd = sum(rtd_returns) / len(rtd_returns) if rtd_returns else None
+
+            # 生成收益率单元格
+            d1_html = self._fmt_return_cell(avg_d1)
+            d3_html = self._fmt_return_cell(avg_d3)
+            d5_html = self._fmt_return_cell(avg_d5)
+            rtd_html = self._fmt_return_cell(avg_rtd)
+
+            role_class = {
+                "research": "role-research",
+                "warning": "role-warning",
+                "final": "role-final"
+            }.get(role_key, "")
+
+            # 构建展开内容（每只股票的详细信息）
+            detail_rows = ""
+            for s in stocks[:10]:  # 最多展示10只
+                s_d1 = self._fmt_return_inline(s.get("d1_return"))
+                s_d3 = self._fmt_return_inline(s.get("d3_return"))
+                s_d5 = self._fmt_return_inline(s.get("d5_return"))
+                s_rtd = self._fmt_return_inline(s.get("return_to_date"))
+                price = s.get('price', 0)
+                price_str = f"{price:.2f}" if price else "-"
+                detail_rows += f"""
+                <tr class="detail-row">
+                  <td>{s.get('code', '')}</td>
+                  <td>{s.get('name', '')}</td>
+                  <td>{s.get('score', 0):.1f}</td>
+                  <td>{price_str}</td>
+                  <td>{s_d1}</td>
+                  <td>{s_d3}</td>
+                  <td>{s_d5}</td>
+                  <td>{s_rtd}</td>
+                </tr>"""
+            if len(stocks) > 10:
+                detail_rows += f"""
+                <tr class="detail-row"><td colspan="8" style="text-align:center;color:#8a8578;">... 共 {len(stocks)} 只股票</td></tr>"""
+
+            history_rows += f"""
+        <tr class="summary-row" onclick="toggleDetail('detail-{idx}')" style="cursor:pointer">
+          <td>{date}</td>
+          <td>{weekday}</td>
+          <td><span class="role-badge {role_class}">{role_name}</span></td>
+          <td>{len(stocks)}只</td>
+          <td>{d1_html}</td>
+          <td>{d3_html}</td>
+          <td>{d5_html}</td>
+          <td>{rtd_html}</td>
+        </tr>
+        <tr id="detail-{idx}" class="detail-container" style="display:none">
+          <td colspan="8" style="padding:0">
+            <table class="detail-table">
+              <thead><tr><th>代码</th><th>名称</th><th>评分</th><th>入手价</th><th>T+1</th><th>T+3</th><th>T+5</th><th>至今</th></tr></thead>
+              <tbody>{detail_rows}</tbody>
+            </table>
+          </td>
+        </tr>"""
+
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>每日推荐报告</title>
+    <style>
+        :root {{
+            --paper: #faf8f4;
+            --card: #ffffff;
+            --ink: #1a1a1a;
+            --ink-2: #555;
+            --muted: #8a8578;
+            --line: #e7e1d3;
+            --accent: #9a3b2a;
+            --up: #c0392b;
+            --down: #1e7d4f;
+            --research-bg: #eef2f6;
+            --research-border: #7a8ba3;
+            --warning-bg: #fdf3e0;
+            --warning-border: #e0a800;
+            --final-bg: #e9f5ec;
+            --final-border: #3d9153;
+        }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            background: var(--paper);
+            color: var(--ink);
+            font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            line-height: 1.7;
+            -webkit-font-smoothing: antialiased;
+        }}
+        .container {{
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 48px 28px 64px;
+        }}
+        .header {{
+            border-bottom: 3px double var(--ink);
+            padding-bottom: 18px;
+            margin-bottom: 32px;
+        }}
+        .header h1 {{
+            font-family: Georgia, 'Songti SC', 'SimSun', serif;
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }}
+        .header .subtitle {{
+            font-size: 14px;
+            color: var(--muted);
+        }}
+        .section-title {{
+            font-family: Georgia, 'Songti SC', 'SimSun', serif;
+            font-size: 20px;
+            font-weight: 700;
+            margin: 32px 0 16px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid var(--accent);
+            display: inline-block;
+        }}
+        .latest-report {{
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 4px;
+            padding: 24px;
+            margin-bottom: 32px;
+        }}
+        .history-table {{
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 4px;
+            overflow: hidden;
+        }}
+        .history-table th {{
+            background: #f5f3ee;
+            text-align: left;
+            padding: 14px 16px;
+            font-size: 12px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+            border-bottom: 1px solid var(--line);
+        }}
+        .history-table td {{
+            padding: 12px 16px;
+            border-bottom: 1px solid #f3efe4;
+            font-size: 14px;
+        }}
+        .history-table tr:last-child td {{
+            border-bottom: none;
+        }}
+        .summary-row:hover {{
+            background: #faf8f4;
+        }}
+        .summary-row td:first-child::before {{
+            content: "▶";
+            display: inline-block;
+            width: 16px;
+            font-size: 10px;
+            color: var(--muted);
+            margin-right: 4px;
+        }}
+        .role-badge {{
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: 600;
+        }}
+        .role-research {{ background: var(--research-bg); color: var(--research-border); border: 1px solid var(--research-border); }}
+        .role-warning {{ background: var(--warning-bg); color: var(--warning-border); border: 1px solid var(--warning-border); }}
+        .role-final {{ background: var(--final-bg); color: var(--final-border); border: 1px solid var(--final-border); }}
+        .return-up {{ color: var(--up); font-weight: 600; }}
+        .return-down {{ color: var(--down); font-weight: 600; }}
+        .return-flat {{ color: var(--muted); }}
+        .detail-container td {{ padding: 0 !important; border-bottom: 2px solid var(--line) !important; }}
+        .detail-table {{ width: 100%; border-collapse: collapse; background: #faf8f4; }}
+        .detail-table th {{ background: #f0ece2; font-size: 11px; padding: 8px 12px; }}
+        .detail-table td {{ font-size: 13px; padding: 6px 12px; border-bottom: 1px solid #f3efe4; }}
+        .detail-table tr:last-child td {{ border-bottom: none; }}
+        .empty-state {{
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--muted);
+        }}
+        .empty-state .icon {{
+            font-size: 48px;
+            margin-bottom: 16px;
+        }}
+        .footer {{
+            text-align: center;
+            color: var(--muted);
+            font-size: 12px;
+            margin-top: 48px;
+            padding-top: 24px;
+            border-top: 1px solid var(--line);
+        }}
+        @media (max-width: 768px) {{
+            .container {{ padding: 24px 16px; }}
+            .history-table {{ font-size: 12px; }}
+            .history-table th, .history-table td {{ padding: 10px 8px; }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>每日推荐报告</h1>
+            <div class="subtitle">量化选股系统</div>
+        </div>
+
+        <h2 class="section-title">最新推荐</h2>
+        <div class="latest-report">
+            {latest_content if latest_content else '<div class="empty-state"><div class="icon">&#x1F4CA;</div><p>暂无推荐数据</p></div>'}
+        </div>
+
+        <h2 class="section-title">历史记录</h2>
+        <table class="history-table">
+            <thead>
+                <tr>
+                    <th>日期</th>
+                    <th>星期</th>
+                    <th>类型</th>
+                    <th>股票数</th>
+                    <th>T+1均值</th>
+                    <th>T+3均值</th>
+                    <th>T+5均值</th>
+                    <th>至今均值</th>
+                </tr>
+            </thead>
+            <tbody>
+                {history_rows if history_rows else '<tr><td colspan="8"><div class="empty-state"><p>暂无历史记录</p></div></td></tr>'}
+            </tbody>
+        </table>
+
+        <div class="footer">
+            本报告基于技术分析和量化因子自动生成，仅供参考，不构成投资建议。<br>
+            股市有风险，投资需谨慎。
+        </div>
+    </div>
+    <script>
+    function toggleDetail(id) {{
+        var el = document.getElementById(id);
+        if (!el) return;
+        var visible = el.style.display !== 'none';
+        el.style.display = visible ? 'none' : '';
+        var row = el.previousElementSibling;
+        if (row) {{
+            var arrow = row.querySelector('td:first-child');
+            if (arrow) arrow.style.setProperty('--arrow', visible ? '&#x25B6;' : '&#x25BC;');
+        }}
+    }}
+    </script>
+</body>
+</html>"""

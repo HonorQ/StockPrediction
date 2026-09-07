@@ -399,6 +399,101 @@ def _am_filter_persist(ctx):
     ctx["cand_by_code"] = cand_by_code
 
 
+def _get_yesterday_tracking(db, market_fetcher, today):
+    """获取昨日推荐的今日表现和操作建议。
+
+    Args:
+        db: 数据库实例
+        market_fetcher: 行情获取器
+        today: 今日日期
+
+    Returns:
+        List[Dict]: 昨日推荐跟踪列表
+    """
+    from datetime import datetime, timedelta
+
+    # 获取昨日推荐（只取afternoon模式，因为这是每日唯一正式推荐）
+    yesterday = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    # 如果昨日是非交易日，往前找最近的交易日
+    for i in range(1, 5):
+        check_date = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=i)).strftime("%Y-%m-%d")
+        recs = db.get_recent_recommendations(days=7, modes=("afternoon",))
+        yesterday_recs = [r for r in recs if r.get("trade_date") == check_date]
+        if yesterday_recs:
+            yesterday = check_date
+            break
+    else:
+        return []
+
+    # 获取昨日推荐的股票代码
+    codes = [r["code"] for r in yesterday_recs if r.get("code")]
+    if not codes:
+        return []
+
+    # 获取这些股票的当前价格
+    try:
+        # 使用市场数据获取器获取实时行情
+        import pandas as pd
+        a_share_df = market_fetcher.get_a_share_realtime()
+        if a_share_df.empty:
+            return []
+
+        # 构建价格映射
+        a_share_df["代码_str"] = a_share_df["代码"].astype(str)
+        price_map = {r["代码_str"]: r for _, r in a_share_df.iterrows()}
+
+        tracking_data = []
+        for rec in yesterday_recs:
+            code = rec.get("code", "")
+            if not code:
+                continue
+
+            # 标准化代码格式
+            code_str = str(code).replace("sh.", "").replace("sz.", "").replace("bj.", "")
+
+            # 获取当前行情
+            current_quote = price_map.get(code_str)
+            if current_quote is None:
+                continue
+
+            current_price = float(current_quote.get("最新价", 0))
+            yesterday_price = float(rec.get("current_price", 0))
+
+            if yesterday_price <= 0 or current_price <= 0:
+                continue
+
+            # 计算今日涨跌幅
+            change_pct = ((current_price - yesterday_price) / yesterday_price) * 100
+
+            # 判断操作建议
+            if change_pct <= -3:
+                action = "淘汰"
+                reason = f"跌幅{change_pct:.2f}%，建议止损"
+            elif change_pct >= 8:
+                action = "关注"
+                reason = f"涨幅{change_pct:.2f}%，考虑止盈"
+            else:
+                action = "持有"
+                reason = f"波动正常，继续观察"
+
+            tracking_data.append({
+                "code": code,
+                "name": rec.get("name", ""),
+                "yesterday_score": rec.get("score", 0),
+                "yesterday_price": yesterday_price,
+                "current_price": current_price,
+                "change_pct": change_pct,
+                "action": action,
+                "reason": reason,
+            })
+
+        return tracking_data
+
+    except Exception as e:
+        logger.warning(f"获取昨日推荐跟踪数据失败: {e}")
+        return []
+
+
 def _am_report(ctx):
     """[午后·阶段7] 报告生成(合并盘前信号字段) + 总结输出。"""
     today = ctx["today"]
@@ -461,6 +556,14 @@ def _am_report(ctx):
     # 否则跨窗口基线的回测推荐会污染回顾表；同日多行由 reporter 按 afternoon 优先去重为1条
     history = db.get_recent_recommendations(
         days=14, modes=("afternoon", "premarket", "feedback_training"))
+
+    # 获取昨日推荐跟踪数据
+    market_fetcher = ctx.get("market_fetcher")
+    if market_fetcher is None:
+        from src.data.market_data import MarketDataFetcher
+        market_fetcher = MarketDataFetcher()
+    yesterday_tracking = _get_yesterday_tracking(db, market_fetcher, today)
+
     report_content = reporter.generate_report(
         recommendations=recommendations,
         market_overview=index_data,
@@ -472,8 +575,9 @@ def _am_report(ctx):
         history_records=history,
         report_role="final",
         intraday_note=afternoon_health_note,
+        yesterday_tracking=yesterday_tracking,
     )
-    report_path = reporter.save_report(report_content)
+    report_path = reporter.save_report(report_content, report_role="final", recommendations=recommendations)
 
     write_summary("afternoon", len(candidates), final,
                    updated=len(updated))

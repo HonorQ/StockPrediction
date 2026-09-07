@@ -91,28 +91,11 @@ td { padding: 8px; border-bottom: 1px solid #f3efe4; }
 .f-row .fv bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
 .warn-row { font-size: 12.5px; color: #856404; padding: 4px 0; }
 
-/* 新闻 */
-.news-card { border: 1px solid var(--line); background: var(--card); border-radius: 2px; padding: 6px 22px 18px; }
-.news-section { margin-bottom: 6px; }
-.news-section h3 { font-size: 12px; font-weight: 700; color: var(--accent); letter-spacing: .06em; margin: 14px 0 4px; }
-.news-item { padding: 9px 0; border-bottom: 1px solid var(--line); }
-.news-item:last-child { border-bottom: none; }
-.news-txt { font-size: 13.5px; color: var(--ink-2); }
-.news-txt.full { display: block; }
-details { font-size: 13.5px; color: var(--ink-2); }
-details summary { cursor: pointer; color: var(--ink); font-weight: 600; list-style: none; position: relative; padding-right: 60px; }
-details summary::-webkit-details-marker { display: none; }
-details summary::after { content: "展开全文 ▾"; position: absolute; right: 0; top: 0; font-size: 12px; color: var(--accent); font-weight: 600; white-space: nowrap; }
-details[open] summary::after { content: "收起 ▴"; }
-details .news-full { font-size: 13px; color: var(--ink); margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); }
-
-.biz-box { background: #f4f0e6; border-left: 3px solid var(--accent); border-radius: 2px; padding: 12px 14px; margin: 10px 0 0; font-size: 12.5px; }
-.biz-box .op-title { font-weight: 600; color: var(--ink); margin-bottom: 6px; }
-.biz-box .biz-line { color: var(--ink-2); margin: 3px 0; }
-.biz-box .moat-val { font-size: 16px; font-weight: 700; }
-.tag { display: inline-block; background: #efe8d9; color: #6b5d3e; border-radius: 2px; padding: 1px 7px; margin: 2px 4px 2px 0; font-size: 11px; }
-.tag-moat { background: #f6e5e2; color: var(--up); }
-.tag-moat-neu { background: #f0ece2; color: var(--muted); }
+/* 昨日推荐跟踪 */
+.tracking-note { font-size: 12px; color: var(--muted); margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px dashed var(--line); }
+.action-hold { background: #e2efe9; color: var(--down); padding: 2px 8px; border-radius: 2px; font-size: 11px; font-weight: 600; }
+.action-watch { background: #f6efe0; color: #856404; padding: 2px 8px; border-radius: 2px; font-size: 11px; font-weight: 600; }
+.action-discard { background: #f6e5e2; color: var(--up); padding: 2px 8px; border-radius: 2px; font-size: 11px; font-weight: 600; }
 
 .footer { text-align: center; color: var(--muted); font-size: 11.5px; margin-top: 34px; line-height: 1.8; }
 .footer::before { content: ""; display: block; width: 60px; height: 3px; background: var(--accent); margin: 0 auto 12px; }

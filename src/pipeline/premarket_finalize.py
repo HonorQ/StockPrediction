@@ -444,7 +444,7 @@ def _pm_report(ctx):
         report_role="research",
         intraday_note=health_note,
     )
-    report_path = reporter.save_report(report_content)
+    report_path = reporter.save_report(report_content, report_role="research", recommendations=recommendations)
     print(f"  ✅ 盘前报告已生成: {report_path}")
     _pack(ctx, dict(locals()))
     ctx["config"] = config

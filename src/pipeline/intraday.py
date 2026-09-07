@@ -267,7 +267,7 @@ def run_intraday(config):
         report_role="warning",
         intraday_note=f"盘中预警于 {now_str}",
     )
-    report_path = reporter.save_report(report_content)
+    report_path = reporter.save_report(report_content, report_role="warning")
 
     write_summary("intraday_watch", len(cache["candidates"]), [],
                    excluded=len(excluded), risky=len(risky))
