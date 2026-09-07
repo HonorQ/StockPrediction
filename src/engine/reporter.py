@@ -95,7 +95,7 @@ class ReportGenerator:
         sections.append(self._build_sentiment(sentiment, rotation_data))
         sections.append(self._build_yesterday_tracking(yesterday_tracking))
         sections.append(self._build_recommendations(recommendations, stop_loss_pct, take_profit_pct))
-        sections.append(self._build_history(history_records))
+        # 历史推荐回顾已移至 index.html 的历史记录表格，不再嵌入详细报告
         sections.append(self._build_footer())
         sections.append("</body></html>")
 
