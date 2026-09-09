@@ -8,7 +8,7 @@ import requests
 import pandas as pd
 from typing import Optional
 from datetime import datetime, timedelta
-import baostock as _BaostockConnection
+import baostock as _bs
 
 try:
     from src.utils.log import get_logger
@@ -231,7 +231,10 @@ class KlineFetcher:
                 rows_box = []
 
                 def _fetch():
-                    rs = _BaostockConnection.query_history_k_data_plus(
+                    # 确保 baostock 已登录，避免 "you don't login" 错误
+                    from src.data.market_data import _BaostockConnection
+                    _BaostockConnection.get_connection()
+                    rs = _bs.query_history_k_data_plus(
                         bs_code, "date,turn",
                         start_date=start,
                         end_date=datetime.now().strftime("%Y-%m-%d"),
