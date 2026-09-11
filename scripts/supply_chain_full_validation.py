@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """供应链完整验证: 拉取38家A股供应链公司数据 + 分析"""
-import os, sys, json, time
+import os, json, time
 import numpy as np, pandas as pd
 import baostock as bs
 
@@ -182,7 +182,7 @@ for r in valid:
           f"{r['lift_2']:>+9.1%}{r['t_stat']:>+7.2f} {sig}")
 
 # 结论
-print(f"\n=== 结论 ===")
+print("\n=== 结论 ===")
 strong = [r for r in valid if r["lift_2"] and r["lift_2"] > 0.05]
 if strong:
     print(f"lift>5%的供应链对: {len(strong)}家")

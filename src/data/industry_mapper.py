@@ -87,7 +87,9 @@ class IndustryMapper:
                     for code in cons[code_col].astype(str):
                         if code not in industry_map:
                             industry_map[code] = board_name
-                except Exception:
+                except Exception as e:
+                    # 单板块拉取失败跳过该板块继续, debug留痕(外层有整体降级warning)
+                    logger.debug(f'东财行业成分获取失败({board_name}): {e}')
                     continue
             logger.info(f'  ✅ 东财行业映射: {len(industry_map)} 只, {len(set(industry_map.values()))} 个行业')
             return industry_map
@@ -108,7 +110,9 @@ class IndustryMapper:
                         symbol = row["symbol"]
                         if symbol not in industry_map:
                             industry_map[symbol] = name
-                except Exception:
+                except Exception as e:
+                    # 单板块拉取失败跳过该板块继续, debug留痕(外层有整体降级error)
+                    logger.debug(f'新浪行业成分获取失败({name}): {e}')
                     continue
             logger.info(f'  ✅ 新浪行业映射: {len(industry_map)} 只, {len(set(industry_map.values()))} 个行业')
             return industry_map

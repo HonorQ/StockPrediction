@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """拉取全年美股数据(365天)"""
-import os, sys, json, time
+import os, time
 import akshare as ak
 import pandas as pd
 

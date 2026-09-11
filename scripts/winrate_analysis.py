@@ -6,7 +6,7 @@
 
 用法: python scripts/winrate_analysis.py [--top-n 10] [--hold 5]
 """
-import os, sys, json, argparse
+import os, argparse
 import numpy as np, pandas as pd, yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -84,7 +84,7 @@ def main():
     df = pd.DataFrame(results)
 
     # 统计
-    print(f"\n=== 当前评分体系胜率分析 ===")
+    print("\n=== 当前评分体系胜率分析 ===")
     print(f"  权重维度: {len(avail_dims)} / {len(weights)}")
     print(f"  选股: Top{args.top_n} | 持有: {hold}日")
     print(f"  面板: {panel['date'].nunique()} 天 / {panel['code'].nunique()} 只")
@@ -148,7 +148,7 @@ def main():
     print(f"{'超额胜率(日度)':<22}{excess_winrate:>11.1f}%")
 
     # 按 hold 分档
-    print(f"\n=== 分持有期胜率 ===")
+    print("\n=== 分持有期胜率 ===")
     for h in [3, 5, 10]:
         col = f"fwd{h}"
         if col not in panel.columns:

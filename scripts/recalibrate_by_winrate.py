@@ -5,7 +5,7 @@
 
 用法: python scripts/recalibrate_by_winrate.py
 """
-import os, sys, json, yaml
+import os, json, yaml
 import numpy as np, pandas as pd
 
 ROOT = r"C:\Users\EDY\Desktop\StockPrediction"

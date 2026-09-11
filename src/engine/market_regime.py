@@ -87,6 +87,18 @@ class MarketRegimeFilter:
                 "get_regime_weights(%s): 忽略不在评分体系中的权重维度: %s",
                 regime, sorted(skipped),
             )
+        # 总和校验(2026-09-11): 覆盖发生在 scorer 归一化之后、batch_normalize 之前,
+        # 无人把关的总和漂移会直接放大评分尺度(旧覆盖段曾致 bear 总和 1.277)。
+        # 超差时等比缩放回基准总和(生产中基准恒为 1.0), 保持覆盖的相对结构。
+        _base_total = sum(float(v) for v in base_weights.values())
+        _total = sum(float(v) for v in adjusted.values())
+        if _total > 0 and abs(_total - _base_total) > 0.02:
+            _scale = _base_total / _total
+            logger.warning(
+                "get_regime_weights(%s): 覆盖致权重总和 %.4f→%.4f，已等比缩放回基准",
+                regime, _base_total, _total,
+            )
+            adjusted = {k: v * _scale for k, v in adjusted.items()}
         return adjusted
 
     def should_empty_portfolio(self, regime: str, score: float) -> bool:

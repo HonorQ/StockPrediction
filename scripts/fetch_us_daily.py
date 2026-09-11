@@ -3,7 +3,7 @@
 
 每天收盘后运行一次，采集美股板块个股快照，存入 cache/us_daily/
 """
-import os, sys, json, time
+import os, json
 from datetime import datetime
 import requests
 
@@ -121,7 +121,7 @@ def main():
 
     # 板块聚合
     sector_ret = build_sector_returns(data)
-    print(f"\n=== 板块等权平均涨跌幅 ===")
+    print("\n=== 板块等权平均涨跌幅 ===")
     for sector, ret in sorted(sector_ret.items(), key=lambda x: -x[1]):
         bar = "█" * max(0, int(abs(ret)))
         sign = "+" if ret > 0 else ""

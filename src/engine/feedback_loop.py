@@ -391,15 +391,20 @@ class FeedbackLoop:
             latest_db_weights = self.db.get_latest_weights()
             if latest_db_weights:
                 for k, v in latest_db_weights.items():
-                    if k in base_weights:
+                    # 清零因子免疫(与 premarket 合并口径一致): config 静态为 0
+                    # 表示已被胜率校准否决, 历史调权结果不得作为调权基准复活它
+                    if k in base_weights and float(base_weights[k]) != 0:
                         base_weights[k] = v
         except Exception as e:
             logger.warning("加载DB最新权重失败，退回config静态权重作为基准: %s", e)
 
         # 1)+2) 时序衰减归因统计 + 连续失败检测 + 惩罚调权
         changes = self._penalty_adjustments(all_attr, base_weights, today)
-        # 3) IC优化调权
-        changes.extend(self._ic_adjustments(base_weights, today))
+        # 3) IC优化调权。跳过惩罚调权已处理的因子: 两步同晚各自落库互不知情,
+        # 曾致 strategy 同日先降后升来回振荡(2026-09-11 修复)
+        penalized = {c["factor"] for c in changes}
+        changes.extend(
+            self._ic_adjustments(base_weights, today, skip_factors=penalized))
 
         # 4) 归一化（仅更新内存中的 config 对象，不写回 config.yaml）
         # 规则 §6：config.yaml 是静态先验，不被反馈循环改写。
@@ -465,6 +470,11 @@ class FeedbackLoop:
         for factor, stats in factor_stats.items():
             if stats["total_weight"] < MIN_ATTRIBUTION_SAMPLES:
                 continue
+            # 清零因子免疫: config 静态权重为 0 表示已被胜率校准否决,
+            # 惩罚调权的 0.005 下限曾将其静默复活为非零权重(2026-09-11 修复)
+            current_weight = float(base_weights.get(factor, 0))
+            if current_weight <= 0:
+                continue
             weighted_wrong_rate = stats["weighted_wrong"] / stats["total_weight"]
 
             if weighted_wrong_rate < 0.3:
@@ -474,7 +484,6 @@ class FeedbackLoop:
             if consecutive_failures.get(factor, 0) >= 3:
                 penalty = min(penalty + 0.2, 0.7)
 
-            current_weight = base_weights.get(factor, 0.05)
             new_weight = round(max(current_weight * (1 - penalty), 0.005), 4)
             new_weight = max(new_weight, current_weight - MAX_WEIGHT_CHANGE)
             new_weight = round(new_weight, 4)
@@ -493,10 +502,13 @@ class FeedbackLoop:
                 )
         return changes
 
-    def _ic_adjustments(self, base_weights: Dict, today: str) -> List[Dict]:
+    def _ic_adjustments(self, base_weights: Dict, today: str,
+                       skip_factors=None) -> List[Dict]:
         """IC优化调权：基于近期IC重新分配权重（24 维 sub_*，与 config.yaml.weights 一一对应）。
 
         失败不应中断归因惩罚调权的结果，但必须留痕便于排查。
+        skip_factors: 本轮惩罚调权已处理的因子集合——IC调权跳过，
+        避免同一天对同一因子先降后升落库互相矛盾(振荡根源)。
         """
         changes = []
         try:
@@ -506,8 +518,22 @@ class FeedbackLoop:
             if factor_data is not None and not factor_data.empty and "future_return" in factor_data.columns:
                 opt_weights = optimizer.optimize_weights(factor_data, return_col="future_return")
                 if opt_weights:
+                    # optimize_weights 按 |IC| softmax 分配权重，不区分信号方向；
+                    # 负 IC 因子未做方向翻转前，给任何正权重都是反向加权
+                    # (2026-09-11 修复: IC=-0.68 曾触发 strategy 上调)。
+                    neg_factors = set(optimizer.negative_ic_factors or [])
+                    if neg_factors:
+                        logger.warning(
+                            "IC优化跳过负IC因子(信号方向未翻转, 上调即反向加权): %s",
+                            sorted(neg_factors))
+                    skip = set(skip_factors or ())
                     for name, opt_w in opt_weights.items():
-                        cur_w = base_weights.get(name, 0)
+                        if name in skip or name in neg_factors:
+                            continue
+                        # 清零因子免疫: config 静态为 0 表示已被胜率校准否决
+                        cur_w = float(base_weights.get(name, 0))
+                        if cur_w <= 0:
+                            continue
                         if abs(opt_w - cur_w) > MAX_WEIGHT_CHANGE:
                             clip_w = cur_w + (MAX_WEIGHT_CHANGE if opt_w > cur_w else -MAX_WEIGHT_CHANGE)
                             changes.append({

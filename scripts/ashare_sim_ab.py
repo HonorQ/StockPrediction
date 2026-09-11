@@ -8,7 +8,7 @@
 
 用法: python scripts/ashare_sim_ab.py [--top-n 30] [--hold 5] [--hold 10]
 """
-import os, sys, json, argparse
+import os, json, argparse
 import numpy as np, pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

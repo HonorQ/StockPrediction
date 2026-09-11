@@ -8,7 +8,7 @@
 用法: python scripts/quantile_analysis.py
 """
 import os, sys, json, time
-import numpy as np, pandas as pd
+import pandas as pd
 import sqlite3
 from datetime import datetime
 

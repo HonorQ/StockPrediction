@@ -11,10 +11,12 @@
   - rebound_analysis 套牢盘重度惩罚分支可达
   - news_fetcher.get_sina_global 异常返回 []
   - backtest T+1 开盘成交 + 并发仓位约束 + 绩效指标口径
+  - liquidity_guard avg_daily_amount_20d 字段缺失不误杀(2026-08-31)
 """
 import os
 import sys
 import unittest
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -334,6 +336,203 @@ class TestBacktestNextDayEntryAndPositionCap(unittest.TestCase):
         )
         # 年化基于真实交易日数而非交易笔数
         self.assertGreaterEqual(eng.trading_day_count, len({t["signal_date"] for t in trades}))
+
+
+class TestLiquidityGuardMissingField(unittest.TestCase):
+    """2026-08-31 修复: avg_daily_amount_20d 字段缺失导致全部候选被误杀
+
+    根因: factors.get("avg_daily_amount_20d", 0) 永远返回0,
+    0 < 0.5亿 恒成立 → 30只候选全部被剔除 → 无推荐。
+    """
+    def _config(self):
+        return {"liquidity_guard": {"enabled": True, "min_daily_amount_yi": 0.5}}
+
+    def test_missing_field_all_kept(self):
+        from src.engine.scorer import apply_liquidity_guard
+        candidates = [
+            {"code": "sh600000", "name": "甲", "score": 60, "factors": {}},
+            {"code": "sh600001", "name": "乙", "score": 55, "factors": {"other_key": 1}},
+        ]
+        result = apply_liquidity_guard(candidates, self._config())
+        self.assertEqual(len(result), 2, "字段缺失时应保留全部候选")
+
+    def test_field_present_excludes_low(self):
+        from src.engine.scorer import apply_liquidity_guard
+        candidates = [
+            {"code": "sh600000", "name": "甲", "score": 60,
+             "factors": {"avg_daily_amount_20d": 1.0}},
+            {"code": "sh600001", "name": "乙", "score": 55,
+             "factors": {"avg_daily_amount_20d": 0.3}},
+        ]
+        result = apply_liquidity_guard(candidates, self._config())
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["code"], "sh600000")
+
+    def test_field_present_keeps_high(self):
+        from src.engine.scorer import apply_liquidity_guard
+        candidates = [
+            {"code": "sh600000", "name": "甲", "score": 60,
+             "factors": {"avg_daily_amount_20d": 2.0}},
+        ]
+        result = apply_liquidity_guard(candidates, self._config())
+        self.assertEqual(len(result), 1)
+
+    def test_disabled_guard_returns_all(self):
+        from src.engine.scorer import apply_liquidity_guard
+        cfg = {"liquidity_guard": {"enabled": False}}
+        candidates = [
+            {"code": "sh600000", "name": "甲", "score": 60, "factors": {}},
+        ]
+        result = apply_liquidity_guard(candidates, cfg)
+        self.assertEqual(len(result), 1)
+
+
+class _FakeDB:
+    """离线假DB: 拦截调权落库, 避免污染生产库(测试禁止写 data/*.db)。"""
+
+    def __init__(self, latest_weights=None, attribution_history=None):
+        self.latest_weights = latest_weights or {}
+        self.attribution_history = attribution_history or []
+        self.saved = []
+
+    def get_latest_weights(self):
+        return self.latest_weights
+
+    def get_attribution_history(self, days=60):
+        return self.attribution_history
+
+    def save_weight_update(self, today, factor, old, new, reason=""):
+        self.saved.append({"factor": factor, "old": old, "new": new})
+
+
+def _wrong_attr(factor, n=6):
+    """构造 n 条全部失败的归因记录(当天, 供惩罚调权统计)。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    return [
+        {"trade_date": today, "factor_results": {factor: {"result": "wrong"}}}
+        for _ in range(n)
+    ]
+
+
+class TestWeightRevivalGuard(unittest.TestCase):
+    """2026-09-11 修复: 已否决(清零)因子不得被反馈循环/历史调权复活。
+
+    背景: config.weights 23 维过拟合因子清零后, weight_history 历史记录、
+    惩罚调权 0.005 下限、|IC| softmax 上调三条路径均在静默复活它们。
+    """
+
+    def _make_loop(self, fake_db, config):
+        from unittest.mock import patch
+        from src.engine.feedback_loop import FeedbackLoop
+        with patch("src.engine.feedback_loop.StockDatabase", return_value=fake_db):
+            loop = FeedbackLoop(config=config)
+        loop.db = fake_db
+        return loop
+
+    def test_penalty_skips_zeroed_factor(self):
+        # 惩罚调权 0.005 下限曾把清零因子写成 0.005
+        cfg = {"weights": {"ashare_specific": 1.0, "strategy": 0.0}}
+        fake_db = _FakeDB()
+        loop = self._make_loop(fake_db, cfg)
+        changes = loop._penalty_adjustments(
+            _wrong_attr("strategy"), cfg["weights"], "2026-09-11")
+        self.assertFalse(any(c["factor"] == "strategy" for c in changes))
+        self.assertFalse(any(s["factor"] == "strategy" for s in fake_db.saved))
+
+    def test_penalty_active_factor_still_adjustable(self):
+        # 非零因子(ashare_specific)的惩罚调权路径保持可用
+        cfg = {"weights": {"ashare_specific": 1.0, "strategy": 0.0}}
+        fake_db = _FakeDB()
+        loop = self._make_loop(fake_db, cfg)
+        changes = loop._penalty_adjustments(
+            _wrong_attr("ashare_specific"), cfg["weights"], "2026-09-11")
+        self.assertTrue(any(c["factor"] == "ashare_specific" for c in changes))
+
+    def test_merge_latest_weights_skips_zeroed(self):
+        # weight_history 合并不得把 DB 历史调权叠加到清零因子上
+        from unittest.mock import patch
+        cfg = {"weights": {"ashare_specific": 1.0, "strategy": 0.0}}
+        fake_db = _FakeDB(
+            latest_weights={"strategy": 0.071, "ashare_specific": 0.9},
+            # 归因记录不足以触发任何调权, 只测合并段
+            attribution_history=[{"trade_date": "2026-09-11", "factor_results": {}}],
+        )
+        loop = self._make_loop(fake_db, cfg)
+        with patch.object(loop, "_build_ic_dataset", return_value=None):
+            loop._adjust_weights(today="2026-09-11")
+        # strategy 若被合并复活(0.071)且惩罚路径免疫失效, 会写入调权记录
+        self.assertFalse(any(s["factor"] == "strategy" for s in fake_db.saved))
+
+    def test_ic_adjustments_skip_zeroed_and_negative_ic(self):
+        # 负 IC 因子未做方向翻转前上调 = 反向加权; 清零因子免疫
+        import pandas as pd
+        rows = []
+        for d in ("2026-09-09", "2026-09-10"):
+            for i in range(6):
+                rows.append({
+                    "trade_date": d, "code": f"sz00000{i}",
+                    # ashare_specific 与收益正相关(IC>0), strategy 负相关(IC<0)
+                    "ashare_specific": 50.0 + i, "strategy": 50.0 - i,
+                    "future_return": float(i) * 2,
+                })
+        df = pd.DataFrame(rows)
+        cfg = {"weights": {"ashare_specific": 1.0, "strategy": 0.0}}
+        fake_db = _FakeDB()
+        loop = self._make_loop(fake_db, cfg)
+        from unittest.mock import patch
+        with patch.object(loop, "_build_ic_dataset", return_value=df):
+            changes = loop._ic_adjustments(cfg["weights"], "2026-09-11")
+        self.assertFalse(any(c["factor"] == "strategy" for c in changes))
+        self.assertFalse(any(s["factor"] == "strategy" for s in fake_db.saved))
+
+    def test_ic_adjustments_skip_oscillation(self):
+        # 同轮惩罚调权已处理的因子, IC 调权不得再动(振荡修复)
+        cfg = {"weights": {"ashare_specific": 1.0}}
+        loop = self._make_loop(_FakeDB(), cfg)
+        changes = loop._ic_adjustments(
+            cfg["weights"], "2026-09-11", skip_factors={"ashare_specific"})
+        self.assertEqual(changes, [])
+
+
+class TestRegimeWeightsGuard(unittest.TestCase):
+    """2026-09-11 修复: regime 覆盖后权重总和必须 ≈1(评分尺度防漂移)。"""
+
+    def _make_filter(self, regime_cfg):
+        from src.engine.market_regime import MarketRegimeFilter
+        filt = MarketRegimeFilter.__new__(MarketRegimeFilter)
+        filt.market_fetcher = None
+        filt._index_cache = {}
+        filt._regime_config = regime_cfg
+        return filt
+
+    def test_override_normalized_to_one(self):
+        # 旧覆盖段曾致 bear 总和 1.277 → 评分尺度膨胀 27.7%
+        filt = self._make_filter({
+            "enabled": True,
+            "weights": {"bull": {"trend": 0.37}},
+        })
+        base = {"ashare_specific": 1.0, "trend": 0.0}
+        w = filt.get_regime_weights("bull", base)
+        self.assertAlmostEqual(sum(w.values()), 1.0, places=2)
+
+    def test_empty_override_returns_base(self):
+        # 清空后的 weights:{} 必须原样返回基准权重
+        filt = self._make_filter({"enabled": True, "weights": {}})
+        base = {"ashare_specific": 1.0, "trend": 0.0}
+        w = filt.get_regime_weights("bear", base)
+        self.assertEqual(w, base)
+
+    def test_config_regime_weights_cleared(self):
+        # 防回归: config.yaml 的 regime.weights 覆盖段保持清空
+        import yaml
+        cfg_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "config.yaml")
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        self.assertEqual(cfg["regime"]["weights"], {})
+        # 择时开关保留(空仓防守不受影响)
+        self.assertTrue(cfg["regime"]["enabled"])
+        self.assertTrue(cfg["regime"]["empty_on_bear"])
 
 
 if __name__ == "__main__":

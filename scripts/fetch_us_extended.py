@@ -3,8 +3,8 @@
 
 扩充每个板块到5-10只代表股, 加入板块ETF作为聚合信号。
 """
-import os, sys, json, time
-import numpy as np, pandas as pd
+import os, time
+import pandas as pd
 import akshare as ak
 
 ROOT = r"C:\Users\EDY\Desktop\StockPrediction"
@@ -148,7 +148,7 @@ def main():
         df.to_csv(os.path.join(US_DIR, f"{sym}_daily.csv"), index=False)
 
     # 计算板块日收益
-    print(f"\n计算板块日收益...")
+    print("\n计算板块日收益...")
     all_dates = set()
     for df in all_data.values():
         all_dates.update(df["date"].tolist())
@@ -183,7 +183,7 @@ def main():
     print(f"已保存: {out_path}")
 
     # 描述统计
-    print(f"\n=== 板块描述统计 ===")
+    print("\n=== 板块描述统计 ===")
     print(f"{'板块':<14}{'均值':>8}{'标准差':>8}{'正涨天':>8}{'天数':>6}")
     for col in sector_df.columns:
         s = sector_df[col].dropna()

@@ -110,7 +110,7 @@ def main():
     for k in ("total", "annual", "mdd", "sharpe", "winrate"):
         print(f"{k:<14}{m_base[k]:>12}{m_trend[k]:>12}{m_strat[k]:>12}{m_both[k]:>12}{m_bench[k]:>12}")
 
-    print(f"\n超额年化(vs基准):")
+    print("\n超额年化(vs基准):")
     print(f"  基线:     {m_base['annual'] - m_bench['annual']:+.2f}%")
     print(f"  反转trend: {m_trend['annual'] - m_bench['annual']:+.2f}%")
     print(f"  反转strat: {m_strat['annual'] - m_bench['annual']:+.2f}%")

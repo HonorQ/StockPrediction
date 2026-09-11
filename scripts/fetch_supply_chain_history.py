@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """拉取A股供应链公司更长历史数据(2年)"""
-import os, sys, json, time
+import os, json, time
 import baostock as bs
 import pandas as pd
 

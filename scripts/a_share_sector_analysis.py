@@ -4,7 +4,7 @@
 用 industry_mapper 将个股分组到行业, 计算行业动量。
 动量强的行业更可能跟随美股板块联动。
 """
-import os, sys, json, numpy as np, pandas as pd
+import os, sys, json, pandas as pd
 
 ROOT = r"C:\Users\EDY\Desktop\StockPrediction"
 

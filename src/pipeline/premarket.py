@@ -142,9 +142,16 @@ def _pm_init(ctx):
         db = StockDatabase()
         latest = db.get_latest_weights()
         if latest:
+            # 清零因子免疫: config 静态权重为 0 表示已被胜率校准否决
+            # (2026-08-27 23 维过拟合清零), 历史/旧逻辑落库的调权结果
+            # 不得将其复活(2026-09-11 修复: 曾致 strategy/trend 等静默回归)。
+            revived = [k for k, v in latest.items()
+                       if k in weights and float(weights[k]) == 0 and float(v) != 0]
             for k, v in latest.items():
-                if k in weights:
+                if k in weights and float(weights[k]) != 0:
                     weights[k] = v
+            if revived:
+                print(f"  [权重合并] 跳过已否决因子的历史调权: {sorted(revived)}")
             print(f"  [权重合并] 从 weight_history 加载 {len(latest)} 个因子最新调权结果")
     except Exception as e:
         print(f"  [权重合并] 跳过: {e}")

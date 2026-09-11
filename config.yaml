@@ -148,45 +148,16 @@ trade:
   volatility_adaptive: true
   volatility_factor: 1.5
 regime:
+  # 择时开关(assess_regime/empty_on_bear 清仓防守)保持有效；
+  # 仅清空 weights 覆盖段(2026-09-11): 该段是 24 维旧架构的残留,
+  # 2026-08-27 胜率校准后 23 维因子已清零, regime 覆盖会静默复活
+  # 过拟合因子(trend/strategy/news 等), 且覆盖发生在 scorer 归一化之后,
+  # 总和漂移至 1.2~1.37 无人校验。恢复前需重新做全量胜率校准。
+  # (旧覆盖段权重依据 reports/market_ic_verdict.json 全市场IC终审 2026-08)
   enabled: true
   empty_on_bear: true
   bear_score_threshold: 35
-  weights:
-    bull:
-      trend: 0.05
-      strategy: 0.08
-      news: 0.08
-      policy_event: 0.08
-      leader: 0.06
-      relative_strength: 0.02
-    neutral:
-      trend: 0.01
-      strategy: 0.05
-      news: 0.06
-      policy_event: 0.07
-      leader: 0.05
-      relative_strength: 0.01
-    bear:
-      trend: 0.001
-      strategy: 0.01
-      news: 0.04
-      policy_event: 0.05
-      leader: 0.03
-      relative_strength: 0.005
-      volatility: 0.08
-      moat: 0.06
-      quant_behavior: 0.001
-    crash:
-      trend: 0.001
-      strategy: 0.003
-      news: 0.02
-      policy_event: 0.03
-      leader: 0.01
-      volatility: 0.1
-      moat: 0.08
-      national_team: 0.06
-      quant_behavior: 0.001
-  note: 权重依据 reports/market_ic_verdict.json 全市场IC终审(2026-08)
+  weights: {}
 weights:
   # 新架构(2026-08-27): 仅ashare_specific参与评分, 其余因子降级为数据记录
   # 依据: 全市场24因子胜率校准, 仅ashare_specific样本外稳定(58.9%胜率)

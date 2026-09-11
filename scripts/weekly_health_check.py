@@ -11,8 +11,8 @@
 
 用法: python scripts/weekly_health_check.py
 """
-import os, sys, json, sqlite3
-from datetime import datetime, timedelta
+import os, json, sqlite3
+from datetime import datetime
 
 ROOT = r"C:\Users\EDY\Desktop\StockPrediction"
 DB = os.path.join(ROOT, "data", "stock_history.db")

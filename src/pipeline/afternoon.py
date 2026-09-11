@@ -433,7 +433,6 @@ def _get_yesterday_tracking(db, market_fetcher, today):
     # 获取这些股票的当前价格
     try:
         # 使用市场数据获取器获取实时行情
-        import pandas as pd
         a_share_df = market_fetcher.get_a_share_realtime()
         if a_share_df.empty:
             return []
@@ -474,7 +473,7 @@ def _get_yesterday_tracking(db, market_fetcher, today):
                 reason = f"涨幅{change_pct:.2f}%，考虑止盈"
             else:
                 action = "持有"
-                reason = f"波动正常，继续观察"
+                reason = "波动正常，继续观察"
 
             tracking_data.append({
                 "code": code,

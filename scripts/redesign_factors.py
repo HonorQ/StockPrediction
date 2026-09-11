@@ -6,7 +6,7 @@
 
 用法: python scripts/redesign_factors.py
 """
-import os, sys, json, yaml
+import os, json
 import numpy as np, pandas as pd
 
 ROOT = r"C:\Users\EDY\Desktop\StockPrediction"
@@ -56,7 +56,7 @@ for r in rows:
     })
 
 sub_df = pd.DataFrame(sub_data)
-print(f"  子因子分布:")
+print("  子因子分布:")
 for col in ["reversion_score", "volatility_score", "position_score", "hot_money_score"]:
     vals = sub_df[col]
     print(f"    {col:<22} 均值={vals.mean():.1f}  标准差={vals.std():.1f}  "

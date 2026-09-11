@@ -26,11 +26,17 @@ def _make_filter(enabled=True):
 
 class TestGetRegimeWeights(unittest.TestCase):
     def test_overrides_applied(self):
+        # 2026-09-11 语义修订: 覆盖致总和漂移超差时等比缩放回基准总和
+        # (防评分尺度膨胀), 断言改为相对结构: 覆盖生效 + 未覆盖维度等比保留。
         base = {"trend": 0.05, "strategy": 0.05, "moat": 0.03}
         out = _make_filter().get_regime_weights("bear", base)
-        self.assertEqual(out["trend"], 0.001)
-        self.assertEqual(out["strategy"], 0.03)
-        self.assertEqual(out["moat"], 0.03)  # 未覆盖维度沿用基准
+        # bear 覆盖 trend=0.001, strategy=0.03 (volatility 跳过), moat 未覆盖
+        self.assertAlmostEqual(
+            out["trend"] / out["strategy"], 0.001 / 0.03, places=4)
+        # 覆盖后总和 = 基准总和(0.13), 未覆盖维度与被覆盖维度同比例缩放
+        self.assertAlmostEqual(sum(out.values()), 0.13, places=4)
+        self.assertAlmostEqual(
+            out["moat"] / out["strategy"], 0.03 / 0.03, places=4)
 
     def test_invalid_dims_skipped(self):
         # volatility 不在24维评分体系，必须被跳过而不是新增为废维度

@@ -5,6 +5,7 @@
 启动时由 run_daily._validate_weights_consistency 强制校验。
 """
 from typing import Dict, List
+import json
 import logging
 import os
 import pandas as pd
@@ -831,7 +832,9 @@ def apply_us_sector_guard(candidates: List[Dict], config: Dict,
         import pandas as pd
         us_df = pd.read_csv(sector_path, index_col=0)
         latest = us_df.iloc[-1]  # 最新一天
-    except Exception:
+    except Exception as e:
+        # 风控降级必须留痕: guard 静默失效比报错更危险(2026-09-11)
+        logger.warning("us_sector_guard: 美股板块数据读取失败, 本轮跳过该风控: %s", e)
         return candidates
 
     # 找出跌幅超阈值的板块
@@ -855,7 +858,8 @@ def apply_us_sector_guard(candidates: List[Dict], config: Dict,
                 os.path.abspath(__file__)))), "data", "industry_map.json")
             with open(industry_path, encoding="utf-8") as f:
                 industry_map = json.load(f)
-        except Exception:
+        except Exception as e:
+            logger.warning("us_sector_guard: 行业映射加载失败, 本轮跳过该风控: %s", e)
             return candidates
 
     # 排除受影响行业的股票
@@ -897,7 +901,8 @@ def load_supply_chain():
                     index[code] = []
                 index[code].append({"us_name": info["name"], "link": s["link"], "degree": s["degree"]})
         return index
-    except Exception:
+    except Exception as e:
+        logger.warning("load_supply_chain: 供应链映射加载失败, 供应链风控本轮不可用: %s", e)
         return {}
 
 
@@ -932,7 +937,8 @@ def apply_supply_chain_guard(candidates: List[Dict], config: Dict,
         import pandas as pd
         us_df = pd.read_csv(sector_path, index_col=0)
         latest = us_df.iloc[-1]
-    except Exception:
+    except Exception as e:
+        logger.warning("supply_chain_guard: 美股数据读取失败, 本轮跳过该风控: %s", e)
         return candidates
 
     # 加载供应链索引
@@ -1039,6 +1045,9 @@ def apply_liquidity_guard(candidates: List[Dict], config: Dict) -> List[Dict]:
     依据：A股无做空机制，低流动性=无法及时止损=硬约束。
     默认阈值 0.5 亿元（5000万），低于该值的票在极端行情下可能无法卖出。
 
+    字段依赖：factors["avg_daily_amount_20d"]（20日日均成交额，亿元）。
+    若该字段缺失则跳过guard（无法判断流动性），打warning。
+
     返回过滤后的列表；被剔除项带 guard_reason 字段供日志/报告说明。
     """
     cfg = config.get("liquidity_guard") or {}
@@ -1046,18 +1055,30 @@ def apply_liquidity_guard(candidates: List[Dict], config: Dict) -> List[Dict]:
         return candidates
     min_amount = float(cfg.get("min_daily_amount_yi", 0.5))  # 亿元
 
+    missing_field_count = 0
     kept, excluded = [], []
     for c in candidates:
         factors = c.get("factors") or {}
-        avg_amount = factors.get("avg_daily_amount_20d", 0) or 0
+        avg_amount = factors.get("avg_daily_amount_20d")
+        if avg_amount is None:
+            missing_field_count += 1
+            kept.append(c)
+            continue
+        avg_amount = float(avg_amount) or 0
         if avg_amount < min_amount:
             c["guard_reason"] = f"流动性不足({avg_amount:.2f}亿<{min_amount}亿)"
             excluded.append(c)
         else:
             kept.append(c)
 
+    log = logging.getLogger("stock_prediction")
+    if missing_field_count:
+        log.warning(
+            "Liquidity guard: %d/%d 只票缺少 avg_daily_amount_20d 字段，"
+            "跳过guard保留（需补充20日日均成交额计算）",
+            missing_field_count, len(candidates))
     if excluded:
-        logging.getLogger("stock_prediction").warning(
+        log.warning(
             "Liquidity guard 剔除 %d 只低流动性票(<%.2f亿): %s",
             len(excluded), min_amount,
             ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))

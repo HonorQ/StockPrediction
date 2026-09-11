@@ -8,8 +8,7 @@
 
 用法: python scripts/supply_chain_validation.py
 """
-import os, sys, json, numpy as np, pandas as pd
-from scipy import stats
+import os, json, numpy as np, pandas as pd
 
 ROOT = r"C:\Users\EDY\Desktop\StockPrediction"
 
@@ -161,7 +160,7 @@ for r in sorted(results, key=lambda x: -x["lift"]):
           f"{r['lift']:>+7.1%} {flag}")
 
 # 结论
-print(f"\n=== 结论 ===")
+print("\n=== 结论 ===")
 if results:
     strong = [r for r in results if r["lift"] > 0.1]
     print(f"lift>10%的供应链对: {len(strong)}/{len(results)}")
@@ -175,7 +174,7 @@ if results:
         if key not in by_us:
             by_us[key] = []
         by_us[key].append(r["lift"])
-    print(f"\n按美股公司汇总平均lift:")
+    print("\n按美股公司汇总平均lift:")
     for us, lifts in sorted(by_us.items(), key=lambda x: -np.mean(x[1])):
         avg = np.mean(lifts)
         sig = "✅" if avg > 0.05 else ("⚠️" if avg > 0 else "❌")

@@ -8,7 +8,7 @@
 
 用法: python scripts/ashare_ic_investigation.py
 """
-import os, sys, json
+import os, json
 import numpy as np, pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,14 +37,14 @@ def main():
     ic_series = pd.DataFrame(ic_by_date)
     overall_ic = ic_series["ic"].mean()
     overall_t = ic_series["ic"].mean() / ic_series["ic"].std() * np.sqrt(len(ic_series)) if ic_series["ic"].std() > 0 else 0
-    print(f"\n=== 全市场 ashare_specific IC (fwd5) ===")
+    print("\n=== 全市场 ashare_specific IC (fwd5) ===")
     print(f"  均值IC: {overall_ic:+.4f}")
     print(f"  t值: {overall_t:+.2f}")
     print(f"  正IC天占比: {(ic_series['ic']>0).mean():.1%}")
     print(f"  样本天数: {len(ic_series)}")
 
     # 3. 按十分位分析: ashare_specific 高低组的收益差异
-    print(f"\n=== 十分位分层 (ashare_specific → fwd5) ===")
+    print("\n=== 十分位分层 (ashare_specific → fwd5) ===")
     results_q = []
     for date, g in panel.groupby("date"):
         if len(g) < 100:
@@ -68,7 +68,7 @@ def main():
     print(f"  Q10-Q1 价差: {q10_q1:+.3f}%")
 
     # 4. 子因子贡献分析: 哪些子因子驱动 ashare_specific
-    print(f"\n=== ashare_specific 子因子 IC 贡献 ===")
+    print("\n=== ashare_specific 子因子 IC 贡献 ===")
     sub_factors = ["reversion_signal", "mean_reversion_score", "volatility_score",
                    "position_score", "sentiment_cycle", "hot_money_score"]
     # 这些字段在 market_panel_daily.csv 中可能不存在, 尝试检测
@@ -117,17 +117,17 @@ def main():
             print(f"  {sf} → fwd5 IC: {ic:+.4f}")
 
     # 5. 结论
-    print(f"\n=== 结论 ===")
+    print("\n=== 结论 ===")
     if overall_ic > 0:
         print(f"  全市场IC={overall_ic:+.4f}(正), 但t={overall_t:+.2f}{'不显著' if abs(overall_t)<2 else '显著'}")
-        print(f"  推荐子集IC=+0.006(t=0.3, 不显著)")
-        print(f"  → ashare_specific 在两个子群方向一致(弱正), 但统计不显著")
-        print(f"  → 之前的 market_ic_verdict 全市场IC=-0.062(t=-5.47) 可能受极端值驱动")
+        print("  推荐子集IC=+0.006(t=0.3, 不显著)")
+        print("  → ashare_specific 在两个子群方向一致(弱正), 但统计不显著")
+        print("  → 之前的 market_ic_verdict 全市场IC=-0.062(t=-5.47) 可能受极端值驱动")
     else:
         print(f"  全市场IC={overall_ic:+.4f}(负), t={overall_t:+.2f}")
-        print(f"  推荐子集IC=+0.006(正, 不显著)")
-        print(f"  → IC方向在子群间翻转, 可能是小票效应")
-        print(f"  → 推荐池过滤掉了小票, 剩余大票的ashare_specific行为不同")
+        print("  推荐子集IC=+0.006(正, 不显著)")
+        print("  → IC方向在子群间翻转, 可能是小票效应")
+        print("  → 推荐池过滤掉了小票, 剩余大票的ashare_specific行为不同")
 
     # 保存
     out = {

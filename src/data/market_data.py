@@ -114,8 +114,10 @@ class MarketDataFetcher:
                     today = _dt.now().strftime("%Y-%m-%d")
                     if row[0] >= today:
                         return self._db.get_klines(clean, days)
-        except Exception:
-            pass  # 本地查询失败，继续走网络
+        except Exception as e:
+            # 本地DB查询失败属常规降级(网络源兜底), debug级留痕避免刷屏
+            logging.getLogger("stock_prediction").debug(
+                "本地K线查询失败, 转网络源: %s (%s)", clean, e)
         # 本地无最新数据，走网络（获取后自动写入DB）
         fetcher = KlineFetcher(
             cache_get=self._cache_get, cache_put=self._cache_put,

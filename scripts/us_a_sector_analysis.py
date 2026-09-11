@@ -9,8 +9,8 @@
 
 需要: 30天以上美股历史数据
 """
-import os, sys, json, glob
-import numpy as np, pandas as pd
+import os, json, glob
+import pandas as pd
 
 ROOT = r"C:\Users\EDY\Desktop\StockPrediction"
 US_DIR = os.path.join(ROOT, "cache", "us_daily")

@@ -5,7 +5,7 @@
 
 用法: python scripts/architecture_assessment.py
 """
-import os, sys, json
+import os
 import numpy as np, pandas as pd
 
 ROOT = r"C:\Users\EDY\Desktop\StockPrediction"
@@ -32,7 +32,7 @@ for month, g in panel.groupby("month"):
         monthly.append({"month": month, "wr": (arr>0).mean()*100, "avg": arr.mean()})
 
 mw = pd.DataFrame(monthly)
-print(f"\nashare_specific 月度胜率:")
+print("\nashare_specific 月度胜率:")
 for _, r in mw.iterrows():
     bar = "█" * int(r["wr"] / 5)
     print(f"  {r['month']}: {r['wr']:5.1f}% {bar} ({r['avg']:+.3f}%)")

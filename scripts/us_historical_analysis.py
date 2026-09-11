@@ -6,7 +6,7 @@
 
 用法: python scripts/us_historical_analysis.py
 """
-import os, sys, json, time
+import os, json, time
 import numpy as np, pandas as pd
 import akshare as ak
 

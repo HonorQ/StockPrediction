@@ -6,7 +6,7 @@
 
 用法: python scripts/cross_market_analysis.py
 """
-import os, sys, json
+import os
 import numpy as np, pandas as pd
 
 ROOT = r"C:\Users\EDY\Desktop\StockPrediction"
@@ -37,7 +37,7 @@ cache_dir = os.path.join(ROOT, "cache")
 if os.path.exists(cache_dir):
     cache_files = os.listdir(cache_dir)
     market_files = [f for f in cache_files if any(k in f.lower() for k in ["market", "index", "sp500", "nasdaq", "dow"])]
-    print(f"\n=== 缓存文件中的市场数据 ===")
+    print("\n=== 缓存文件中的市场数据 ===")
     for f in market_files[:10]:
         print(f"  {f}")
 
@@ -45,7 +45,7 @@ if os.path.exists(cache_dir):
 kline_cache = os.path.join(ROOT, "cache", "klines")
 if os.path.exists(kline_cache):
     kline_files = os.listdir(kline_cache)
-    print(f"\n=== K线缓存 ===")
+    print("\n=== K线缓存 ===")
     print(f"  文件数: {len(kline_files)}")
     # 看是否有指数文件
     index_files = [f for f in kline_files if f.startswith(("sh.000", "sz.399"))]

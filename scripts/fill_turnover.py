@@ -5,9 +5,8 @@
 
 用法: python scripts/fill_turnover.py
 """
-import os, sys, time, pickle
+import os, sys, time
 import sqlite3
-from datetime import datetime, timedelta
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
