@@ -39,6 +39,24 @@ class PolicyEventFactor:
         "战争", "冲突", "制裁", "禁运",
     ]
 
+    # 个股硬利空关键词(2026-09-11): 政策/监管确定性行为, 用于 policy_guard 排雷。
+    # 与"利空/下跌"等情绪词不同, 这些是公告级事件, 误报率低;
+    # 匹配前提是新闻直接点名该股(code/名称出现), 不做行业传导级匹配(误伤面大)。
+    HARD_NEGATIVE_KEYWORDS = [
+        "立案调查", "立案告知", "行政处罚", "警示函", "监管函", "问询函",
+        "减持公告", "清仓式减持", "拟减持",
+        "退市风险", "终止上市", "*ST",
+        "质押爆仓", "强制平仓", "平仓风险",
+        "商誉减值", "巨额亏损", "重大违法",
+    ]
+
+    # 政治局会议临近检测(2026-09-11, 事件日历自动维护的补充):
+    # 政治局会议日期无官方日历(仅提前几天由新闻放出), 官网日历和规律播种
+    # 都覆盖不到, 只能从盘前新闻流检测。前向词=即将召开, 回顾词=已开完。
+    # 仅供 _event_calendar_cap 的动态补充(影子模式), 不参与评分。
+    POLITBURO_UPCOMING = ["政治局会议", "中央政治局会议"]
+    POLITBURO_FORWARD = ["将于", "召开在即", "即将召开", "定于", "计划召开"]
+
     def __init__(self, asof: datetime = None):
         self.macro_detector = MacroEventDetector()
         self.policy_chain = self._load_policy_chain()
@@ -118,7 +136,33 @@ class PolicyEventFactor:
         elif result["policy_score"] < 45:
             result["policy_direction"] = "negative"
 
+        # 4. 政治局会议临近检测(全局事件, 影子模式, 不参与评分)
+        # 只在首次调用时扫描新闻并缓存于实例; 事件日历自动维护消费。
+        if not getattr(self, "_politburo_checked", False):
+            self._politburo_checked = True
+            detected = self._detect_politburo_upcoming(news_list or [])
+            if detected:
+                self.politburo_upcoming = detected
+                result["signals"].append(f"事件日历: {detected}")
+
         return result
+
+    def _detect_politburo_upcoming(self, news_list: List[Dict]) -> str:
+        """扫描新闻流检测政治局会议临近信号(影子模式)。
+
+        匹配规则: 同一条新闻内同时出现"政治局会议"和前向词(将于/即将召开等)。
+        回顾性文章("昨日召开")不会命中前向词, 降低误报。
+        返回信号描述字符串, 未检出返回 ""。
+        误报代价受控: 事件日历窗口检测只打日志不封顶(见 config
+        event_calendar.politburo_news), 影子观察期后可转正。
+        """
+        for news in news_list:
+            content = news.get("content", "") + " " + news.get("title", "")
+            if not any(kw in content for kw in self.POLITBURO_UPCOMING):
+                continue
+            if any(kw in content for kw in self.POLITBURO_FORWARD):
+                return str(content)[:60]
+        return ""
 
     # ----------------------------------------------------------------
     # 宏观事件影响
@@ -164,6 +208,25 @@ class PolicyEventFactor:
             # 检查是否是重大事件
             if any(kw in content for kw in self.MAJOR_EVENT_KEYWORDS):
                 major_news.append(news)
+
+        # === 硬利空点名检测(2026-09-11, policy_guard 消费) ===
+        # 不要求新闻同时是"政策/重大"新闻——立案调查/减持公告类快讯
+        # 未必含政策关键词, 但只要直接点名个股即为确定性风险。
+        # 事件 type 固定为 hard_negative, 半衰期 48h(公告效应持续数日)。
+        for news in news_list:
+            content = news.get("content", "") + " " + news.get("title", "")
+            if not (stock_code in content or (stock_name and stock_name in content)):
+                continue
+            if not any(kw in content for kw in self.HARD_NEGATIVE_KEYWORDS):
+                continue
+            time_weight = self._time_weight(news, half_life_hours=48, asof=self.asof)
+            result["score"] -= 15 * time_weight
+            result["signals"].append(f"硬利空点名{stock_name or stock_code}")
+            result["events"].append({
+                "type": "hard_negative",
+                "title": content[:50],
+                "impact": "high",
+            })
 
         # 处理重大事件（最高优先级）
         for news in major_news:

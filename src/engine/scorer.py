@@ -145,9 +145,16 @@ class StockScorer:
         新增：在 Z-Score 之前对预定义的高相关因子对做残差化正交处理，
         防止共线因子在加权时被重复计算（双重 beta 暴露）。
         """
-        dims = [k for k in weights.keys() if weights.get(k, 0) > 0]
-        if not dims or not candidates:
+        weight_dims = [k for k in weights.keys() if weights.get(k, 0) > 0]
+        if not weight_dims or not candidates:
             return
+        # z_scores 对全部 sub_scores 维度计算, 加权求和仅计正权重维度——
+        # 评分数值与旧版完全一致(只加权正权重维), 但 guard 可消费任意维的截面 z。
+        # (2026-09-11 修复: 单因子架构下 dims 只剩 ashare_specific,
+        #  chip_guard 的 z>threshold 分支自 08-27 起静默失效, 实盘剔除
+        #  实际全来自 pos_250 分支——汇总日志文案写死"(z>1.5)"造成误导)
+        dims = sorted({d for c in candidates
+                       for d in (c.get("sub_scores") or {})})
 
         ortho_pairs = list(StockScorer.ORTHOGONALIZE_PAIRS) + list(extra_ortho_pairs or [])
 
@@ -196,7 +203,10 @@ class StockScorer:
                 else:
                     z = max(-3.0, min(3.0, (vals[i] - mu) / sigma))
                 z_scores[dim] = round(z, 3)
-                z_total += z * weights[dim]
+                # 仅正权重维度进入总分(零权重维的 z 只作 guard 截面参考)
+                w = float(weights.get(dim, 0) or 0)
+                if w > 0:
+                    z_total += z * w
 
             score = 50 + z_total * (50 / 3)
             penalty = c.get("expectation_penalty", 0)
@@ -1082,4 +1092,66 @@ def apply_liquidity_guard(candidates: List[Dict], config: Dict) -> List[Dict]:
             "Liquidity guard 剔除 %d 只低流动性票(<%.2f亿): %s",
             len(excluded), min_amount,
             ", ".join(f"{c.get('name', c.get('code', '?'))}" for c in excluded[:5]))
+    return kept
+
+
+def apply_policy_guard(candidates: List[Dict], config: Dict) -> List[Dict]:
+    """政策硬利空排除器：新闻直接点名个股的公告级利空(立案调查/行政处罚/
+    减持公告/退市风险等)时剔除。
+
+    定位(2026-09-11, 政策市避雷): 与已被胜率校准证伪的"政策利好追涨"
+    (policy_event 权重 0)不同, 本 guard 只做下行保护——A 股个股负面公告
+    效应是确定性最强的市场规律之一, 排除不需要预测能力。延续 guard 体系
+    "识别确定性风险并排除"的架构哲学, 不碰评分权重。
+
+    字段依赖: factors["policy_events"] (PolicyEventFactor 产出, 见
+    premarket_deep._calc_policy_deep_block), 其中 type=hard_negative 的事件
+    仅在新闻直接点名该股时产生, 不做行业传导级匹配(误伤面大)。
+
+    影子模式(shadow=True, 默认): 只打标 policy_shadow_reason 不剔除,
+    由 _apply_guards_with_audit 落库 guard_exclusions(guard_name='policy_shadow'),
+    用 T+N 真实收益验证避雷率后再置 shadow: false 转正。
+
+    返回过滤后的列表(影子模式返回原列表, 打标不剔除)。
+    """
+    cfg = config.get("policy_guard") or {}
+    if not cfg.get("enabled", False):
+        return candidates
+    shadow = bool(cfg.get("shadow", True))
+    hard_types = set(cfg.get("hard_negative_types", ["hard_negative"]))
+
+    kept, excluded, shadow_flagged = [], [], []
+    for c in candidates:
+        factors = c.get("factors") or {}
+        events = factors.get("policy_events") or []
+        hits = [e for e in events
+                if isinstance(e, dict) and e.get("type") in hard_types]
+        if not hits:
+            kept.append(c)
+            continue
+        reason = f"政策硬利空点名({str(hits[0].get('title', ''))[:24]})"
+        if shadow:
+            c["policy_shadow_reason"] = reason
+            shadow_flagged.append(c)
+        else:
+            c["guard_reason"] = reason
+            excluded.append(c)
+
+    log = logging.getLogger("stock_prediction")
+    if shadow and shadow_flagged:
+        log.warning(
+            "Policy guard(影子) 标记 %d 只硬利空票(不剔除, 待T+N收益验证): %s",
+            len(shadow_flagged),
+            ", ".join(f"{c.get('name', c.get('code', '?'))}"
+                      f"[{c.get('policy_shadow_reason', '')[:30]}]"
+                      for c in shadow_flagged[:5]))
+    elif excluded:
+        log.warning(
+            "Policy guard 剔除 %d 只硬利空票: %s",
+            len(excluded),
+            ", ".join(f"{c.get('name', c.get('code', '?'))}"
+                      f"[{c.get('guard_reason', '')[:30]}]"
+                      for c in excluded[:5]))
+    if shadow:
+        return candidates  # 影子模式: 全部保留(已打标)
     return kept

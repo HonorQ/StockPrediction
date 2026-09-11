@@ -220,3 +220,29 @@ liquidity_guard:
   enabled: true
   min_daily_amount_yi: 0.5
   note: '低流动性排除器: 日均成交额<5000万的票在极端行情下无法止损(A股无做空,流动性是硬约束)'
+policy_guard:
+  enabled: true
+  shadow: true
+  hard_negative_types:
+  - hard_negative
+  note: '政策硬利空排除器(2026-09-11, 影子模式起步): 立案调查/行政处罚/减持公告/退市风险等
+    公告级利空直接点名个股时排除。只做下行保护不碰评分权重(政策利好追涨已被胜率校准证伪)。
+    影子期只打标+落库guard_exclusions(guard_name=policy_shadow), 用T+N真实收益验证
+    避雷/误杀比例后再置shadow: false转正。关键词表在src/factors/policy_event.py::HARD_NEGATIVE_KEYWORDS'
+event_calendar:
+  enabled: true
+  default_cap: 1
+  # 自动维护(2026-09-11): FOMC官网抓取(7天缓存, 抓取失败用过期缓存降级) +
+  # 两会/中央经济工作会议规律播种(纯本地)。config静态events优先级最高, 手工修正不被覆盖。
+  auto_fomc: true
+  auto_seed: true
+  # 政治局会议无官方日历, 靠盘前新闻关键词检测(前向词过滤降低回顾性文章误报)。
+  # 影子模式只打日志不封顶, 观察1-2次会议窗口的误报率后置shadow: false转正。
+  politburo_news:
+    enabled: true
+    shadow: true
+  events:
+  # 静态条目(最高优先): 政治局会议日期公布后在此补条目; FOMC已由官网自动抓取
+  # 覆盖2026-2027全年, 两会/中经会已由规律播种覆盖, 无需手工维护。
+  note: '重大事件日历窗口防守(2026-09-11): 窗口期内推荐上限封顶(默认1)。FOMC/政治局会议/
+    中央经济工作会议/两会等事件落地前后波动放大, T+3持仓横跨窗口风险不对称。只减仓不加仓。'

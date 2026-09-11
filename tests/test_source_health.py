@@ -37,12 +37,16 @@ class TestSourceHealth(unittest.TestCase):
     def test_health_check_keys(self):
         with mock.patch.object(sh.requests, "get", return_value=FakeResp("ok")):
             status = sh.health_check()
-        self.assertEqual(set(status.keys()), {"eastmoney", "tencent", "sina"})
+        # 2026-09-11 新增 fomc_calendar(事件日历自动维护源)
+        self.assertEqual(
+            set(status.keys()), {"eastmoney", "tencent", "sina", "fomc_calendar"})
 
     def test_health_check_no_raise_on_network_error(self):
         with mock.patch.object(sh.requests, "get", side_effect=RuntimeError):
             status = sh.health_check()
-        self.assertEqual(status, {"eastmoney": False, "tencent": False, "sina": False})
+        self.assertEqual(status, {
+            "eastmoney": False, "tencent": False, "sina": False,
+            "fomc_calendar": False})
 
     def test_summarize_marks(self):
         s = sh.summarize({"eastmoney": True, "tencent": False, "sina": True})

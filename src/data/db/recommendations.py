@@ -111,6 +111,27 @@ class RecommendationsMixin:
             CREATE INDEX IF NOT EXISTS idx_attr_failure ON factor_attribution(is_failure)
         """)
 
+        # guard 剔除清单(2026-09-11): 此前被 guard 排除的票只存在于内存/日志,
+        # 无法事后审计"guard 是避雷还是误杀"。此表为 T+N 真实收益回查的数据地基。
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS guard_exclusions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                code TEXT NOT NULL,
+                name TEXT,
+                guard_name TEXT NOT NULL,
+                guard_reason TEXT,
+                score REAL,
+                sub_scores TEXT,
+                factors TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(trade_date, code, guard_name)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_gexcl_date ON guard_exclusions(trade_date)
+        """)
+
     def save_recommendation(self, trade_date: str, code: str, name: str,
                             score: float, price: float, rank: int = 1,
                             mode: str = "premarket", factors: dict = None,
@@ -251,6 +272,36 @@ class RecommendationsMixin:
         sql = f"INSERT INTO factor_snapshots ({', '.join(full_cols)}) VALUES ({placeholders})"
         with self._connection() as conn:
             conn.executemany(sql, values_list)
+
+
+    def save_guard_exclusions_batch(self, trade_date: str, items: list):
+        """批量写入 guard 剔除清单(幂等: UNIQUE(trade_date,code,guard_name)+REPLACE)。
+
+        items 元素: {code, name, guard_name, guard_reason, score, sub_scores, factors}
+        消费方: pipeline/premarket_finalize._apply_guards_with_audit;
+        审计方: scripts/guard_audit.py 用 T+N 真实收益回查剔除正确性。
+        """
+        if not items:
+            return
+        values_list = []
+        for it in items:
+            sub_scores = it.get("sub_scores") or {}
+            factors = it.get("factors") or {}
+            values_list.append([
+                trade_date, it["code"], it.get("name", ""),
+                it.get("guard_name", ""), it.get("guard_reason", ""),
+                it.get("score"),
+                json.dumps(sub_scores, ensure_ascii=False, cls=_NumpyEncoder) if sub_scores else None,
+                json.dumps(factors, ensure_ascii=False, cls=_NumpyEncoder) if factors else None,
+            ])
+        sql = """INSERT OR REPLACE INTO guard_exclusions
+                 (trade_date, code, name, guard_name, guard_reason, score, sub_scores, factors)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
+        try:
+            with self._connection() as conn:
+                conn.executemany(sql, values_list)
+        except sqlite3.Error as e:
+            logger.warning("guard剔除清单落库失败(不影响主流程): %s", e)
 
 
     def get_factor_snapshot_by_code_date(self, trade_date: str,

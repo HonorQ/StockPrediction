@@ -806,9 +806,10 @@ class ReportGenerator:
         if history:
             latest_content = history[0].get("content", "")
 
-        # 历史摘要表格（从第2条开始）
+        # 历史摘要表格（从第2条开始，只显示每日推荐类型）
         history_rows = ""
-        for idx, entry in enumerate(history[1:]):
+        final_entries = [entry for entry in history[1:] if entry.get("role_key") == "final"]
+        for idx, entry in enumerate(final_entries):
             role_key = entry.get("role_key", "unknown")
             role_name = entry.get("role", role_names.get(role_key, "报告"))
             date = entry.get("date", "")

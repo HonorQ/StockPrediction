@@ -51,10 +51,18 @@ def check_sina() -> bool:
 
 def health_check() -> dict:
     """返回各数据源可用状态字典。"""
+    # FOMC日历源(事件日历自动维护): 探测失败只影响自动抓取, 不影响行情主链
+    fomc_ok = False
+    try:
+        from src.data.event_calendar import check_fomc_source
+        fomc_ok = check_fomc_source()
+    except Exception:
+        fomc_ok = False
     return {
         "eastmoney": check_eastmoney(),
         "tencent": check_tencent(),
         "sina": check_sina(),
+        "fomc_calendar": fomc_ok,
     }
 
 

@@ -50,22 +50,10 @@ def _pm_guard(ctx):
         print(f"  (动态正交化 {len(dynamic_pairs)} 对已加载)")
     StockScorer.batch_normalize(scored_stocks, weights, extra_ortho_pairs=dynamic_pairs)
 
-    # === 多层风控排除(实盘/回测同口径) ===
+    # === 多层风控排除(实盘/回测同口径) + 剔除清单落库(2026-09-11) ===
     # alpha_overlay 已禁用(2026-08-26 组合模拟证伪多头可提取性), 不再调用
-    from src.engine.scorer import (apply_chip_guard, apply_ashare_guard,
-                                    apply_us_sector_guard, apply_supply_chain_guard,
-                                    apply_oversold_rebound_guard, apply_liquidity_guard)
-    scored_stocks = apply_chip_guard(scored_stocks, config)
-    scored_stocks = apply_ashare_guard(scored_stocks, config)
-    # 美股板块风控: 传入行业映射
-    industry_map = market_fetcher.get_industry_map() if market_fetcher else None
-    scored_stocks = apply_us_sector_guard(scored_stocks, config, industry_map=industry_map)
-    # 美股供应链风控: 美股跌>2%排除A股供应商
-    scored_stocks = apply_supply_chain_guard(scored_stocks, config)
-    # oversold_rebound反向排除: 剔除截面前10%(高分位反而跌)
-    scored_stocks = apply_oversold_rebound_guard(scored_stocks, config)
-    # 流动性风控: 排除日均成交额<5000万的低流动性票
-    scored_stocks = apply_liquidity_guard(scored_stocks, config)
+    scored_stocks = _apply_guards_with_audit(
+        scored_stocks, config, market_fetcher=market_fetcher, db=db)
 
     # 信号筛选
     print("  --- 第二层: 信号强度筛选 ---")
@@ -119,9 +107,161 @@ def _pm_guard(ctx):
     except Exception as e:
         logger.warning("策略健康度监控失败(不影响主流程): %s", e)
 
+    # === 重大事件日历窗口防守(2026-09-11, 政策市经典打法) ===
+    # 窗口期内 max_recommend 封顶: 重大政策事件(FOMC/政治局会议/两会等)
+    # 落地前后波动放大, T+3 短持仓横跨窗口的风险不对称。纯配置零预测:
+    # 只减仓不加仓, 最坏代价是错过机会。
+    # 日期来源: config静态 + FOMC官网自动 + 两会/中经会规律播种(三级合并);
+    # 政治局会议无官方日历, 由 policy_signals 新闻检测补充(影子模式)。
+    try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        ev_cap, ev_note = _event_calendar_cap(config, today_str)
+        if ev_cap is not None and max_rec > ev_cap:
+            print(f"  📅 事件窗口防守: {ev_note} 推荐上限 {max_rec} → {ev_cap}")
+            health_note = (health_note + f"【{ev_note}, 推荐上限降至{ev_cap}】"
+                           if health_note else f"【{ev_note}, 推荐上限降至{ev_cap}】")
+            max_rec = ev_cap
+        # 政治局会议新闻检测(影子: 只打日志, 不封顶, 观察误报率后转正)
+        pb_cfg = (config.get("event_calendar") or {}).get("politburo_news") or {}
+        if pb_cfg.get("enabled", False):
+            pb_hit = _detect_politburo_in_signals(scored_stocks)
+            if pb_hit:
+                if pb_cfg.get("shadow", True):
+                    print(f"  📅 政治局会议临近(影子, 不封顶): {pb_hit[:60]}")
+                else:
+                    print(f"  📅 政治局会议临近: 推荐上限 {max_rec} → 1")
+                    max_rec = min(max_rec, 1)
+    except Exception as e:
+        logger.warning("事件日历检查失败(不影响主流程): %s", e)
+
     recommendations = final[:max_rec]
     _pack(ctx, dict(locals()))
     ctx["config"] = config
+
+
+def _detect_politburo_in_signals(scored_stocks) -> str:
+    """从候选池 policy_signals 中提取政治局会议临近信号(全局事件, 任一命中即返回)。
+
+    信号由 PolicyEventFactor.calculate 检测并写入(前向词过滤, 见
+    factors/policy_event.py::_detect_politburo_upcoming)。此处只做汇聚。
+    """
+    for c in scored_stocks:
+        signals = (c.get("factors") or {}).get("policy_signals") or []
+        for s in signals:
+            if isinstance(s, str) and s.startswith("事件日历: "):
+                return s[len("事件日历: "):]
+    return ""
+
+
+def _event_calendar_cap(config: dict, today_str: str, fetch_auto: bool = True):
+    """检查 today 是否落在任一事件窗口内。返回 (cap, note) 或 (None, '')。
+
+    日期来源三级合并(2026-09-11 自动化): config静态(最高优先) +
+    FOMC官网抓取 + 两会/中央经济工作会议规律播种, 见 src/data/event_calendar.py。
+    config.event_calendar 段: {enabled, default_cap, events, auto_fomc, auto_seed}。
+    日期为 ISO 字符串, 字典序比较即时间序。命中多个窗口取最小 cap。
+    fetch_auto=False 时只用 config 静态条目(供离线测试)。
+    """
+    cal_cfg = config.get("event_calendar") or {}
+    if not cal_cfg.get("enabled", False):
+        return None, ""
+    default_cap = int(cal_cfg.get("default_cap", 1))
+    # 合并自动日历(网络/解析失败内部已降级, 不会抛出)
+    if fetch_auto:
+        try:
+            from src.data.event_calendar import merge_event_calendars
+            events = merge_event_calendars(config, today=today_str)
+        except Exception as e:
+            logger.warning("自动事件日历合并失败, 降级为仅静态条目: %s", e)
+            events = cal_cfg.get("events", []) or []
+    else:
+        events = cal_cfg.get("events", []) or []
+    hit_cap, hit_note = None, ""
+    for ev in events:
+        win = ev.get("window") or []
+        # YAML 未加引号的日期会解析成 date 对象, 统一转 str 再做字典序比较
+        win = [str(w)[:10] for w in win]
+        if len(win) != 2 or not (win[0] <= today_str <= win[1]):
+            continue
+        # merge 输出的自动条目带 "cap": None 键, get 默认值不生效, 需显式判空
+        cap_val = ev.get("cap")
+        cap = int(cap_val) if cap_val is not None else default_cap
+        note = f"事件窗口({ev.get('name', '?')},{win[0]}~{win[1]})"
+        if hit_cap is None or cap < hit_cap:
+            hit_cap, hit_note = cap, note
+    return hit_cap, hit_note
+
+
+def _apply_guards_with_audit(scored_stocks, config, market_fetcher=None, db=None):
+    """执行多层风控排除链, 并把剔除清单落库 guard_exclusions(2026-09-11)。
+
+    背景: 此前被 guard 排除的票只存在于内存与日志, 无法用 T+N 真实收益
+    回查"guard 是避雷还是误杀"——没有闭环审计的 guard 只是信仰。
+    实现上不改 6 个 guard 的签名(它们原地挂 guard_reason 并返回 kept 列表),
+    用调用前后 code 集合 diff 识别剔除项; 串行链上前一个 guard 剔除的票
+    不会再被后续 guard 触碰, 归因到首个剔除它的 guard, 语义正确。
+    落库失败仅 warning(审计是旁路, 不得影响主流程)。
+    """
+    from src.engine.scorer import (apply_chip_guard, apply_ashare_guard,
+                                    apply_us_sector_guard, apply_supply_chain_guard,
+                                    apply_oversold_rebound_guard, apply_liquidity_guard,
+                                    apply_policy_guard)
+    # 美股板块风控需要行业映射
+    industry_map = None
+    if market_fetcher is not None:
+        try:
+            industry_map = market_fetcher.get_industry_map()
+        except Exception as e:
+            logger.warning("行业映射获取失败, us_sector_guard 降级: %s", e)
+
+    guard_chain = [
+        ("policy", apply_policy_guard, {}),                               # 政策硬利空(影子起步)
+        ("chip", apply_chip_guard, {}),                                   # 获利盘压力
+        ("ashare", apply_ashare_guard, {}),                               # 弱信号
+        ("us_sector", apply_us_sector_guard, {"industry_map": industry_map}),  # 美股板块联动
+        ("supply_chain", apply_supply_chain_guard, {}),                   # 美股供应链
+        ("oversold_rebound", apply_oversold_rebound_guard, {}),           # 超跌反弹反向
+        ("liquidity", apply_liquidity_guard, {}),                         # 低流动性
+    ]
+    excluded_items = []
+    pool = scored_stocks
+    for guard_name, guard_fn, kwargs in guard_chain:
+        before = list(pool)
+        pool = guard_fn(pool, config, **kwargs)
+        kept_codes = {c.get("code") for c in pool}
+        for c in before:
+            if c.get("code") not in kept_codes:
+                excluded_items.append({
+                    "code": c.get("code", ""),
+                    "name": c.get("name", ""),
+                    "guard_name": guard_name,
+                    "guard_reason": c.get("guard_reason", ""),
+                    "score": c.get("score"),
+                    "sub_scores": c.get("sub_scores"),
+                    "factors": c.get("factors"),
+                })
+    # policy_guard 影子模式: 打标不剔除, diff 捕捉不到, 单独收集落库
+    # (guard_name='policy_shadow', 与转正后的 'policy' 区分, 审计时分开统计)
+    for c in pool:
+        if c.get("policy_shadow_reason"):
+            excluded_items.append({
+                "code": c.get("code", ""),
+                "name": c.get("name", ""),
+                "guard_name": "policy_shadow",
+                "guard_reason": c.get("policy_shadow_reason", ""),
+                "score": c.get("score"),
+                "sub_scores": c.get("sub_scores"),
+                "factors": c.get("factors"),
+            })
+    if excluded_items and db is not None:
+        today = datetime.now().strftime("%Y-%m-%d")
+        try:
+            db.save_guard_exclusions_batch(today, excluded_items)
+            print(f"  📋 guard 剔除清单落库: {len(excluded_items)} 条 → guard_exclusions")
+        except Exception as e:
+            # 审计是旁路, 落库失败不得影响主流程(与 guard 本体的降级语义一致)
+            logger.warning("guard 剔除清单落库失败(不影响主流程): %s", e)
+    return pool
 
 
 # 行业→赛道 映射与赛道容量上限(原字面量原样保留, 语义见 _pm_diversify)

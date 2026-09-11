@@ -283,7 +283,7 @@ class TestBacktestNextDayEntryAndPositionCap(unittest.TestCase):
         for i in range(4):
             closes = 10 * (1 + 0.002 * i) * (1 + np.sin(np.arange(n) / 9) * 0.03)
             histories[f"sz00000{i}"] = _mk_history(dates, closes)
-        eng = BacktestEngine(initial_capital=1_000_000)
+        eng = BacktestEngine(initial_capital=1_000_000, guard_config={})
         signals = []
         for sc, h in histories.items():
             signals.extend(eng._generate_signals(sc, h, train_size=60))
@@ -533,6 +533,507 @@ class TestRegimeWeightsGuard(unittest.TestCase):
         # 择时开关保留(空仓防守不受影响)
         self.assertTrue(cfg["regime"]["enabled"])
         self.assertTrue(cfg["regime"]["empty_on_bear"])
+
+
+class TestAvgDailyAmountProducer(unittest.TestCase):
+    """2026-09-11 修复: avg_daily_amount_20d 生产者随未提交改动丢失,
+    liquidity_guard 自 08-31 下午起连续10天空转(生产日志实锤 25/25 缺字段)。
+
+    数据为受控合成测试数据, 非真实行情。
+    """
+    def _make_history(self, amounts):
+        import pandas as pd
+        n = len(amounts)
+        return pd.DataFrame({
+            "日期": [f"2026-08-{i+1:02d}" for i in range(n)],
+            "收盘": [10.0] * n,
+            "成交额": amounts,
+        })
+
+    def test_produces_yi_unit(self):
+        from src.pipeline.premarket_deep import _calc_avg_daily_amount_20d
+        # 20日每日成交额 1亿元 → 均值 1.0 亿
+        df = self._make_history([1e8] * 25)
+        self.assertAlmostEqual(_calc_avg_daily_amount_20d(df), 1.0, places=4)
+
+    def test_uses_last_20_days(self):
+        from src.pipeline.premarket_deep import _calc_avg_daily_amount_20d
+        # 前10天 100亿(应被 tail(20) 排除), 后20天 1亿 → 均值 1.0 亿
+        df = self._make_history([1e10] * 10 + [1e8] * 20)
+        self.assertAlmostEqual(_calc_avg_daily_amount_20d(df), 1.0, places=4)
+
+    def test_below_threshold_value(self):
+        # 与 guard 阈值对齐: 3000万 < 0.5亿 应产出 0.3 (guard 将剔除)
+        from src.pipeline.premarket_deep import _calc_avg_daily_amount_20d
+        df = self._make_history([3e7] * 20)
+        self.assertAlmostEqual(_calc_avg_daily_amount_20d(df), 0.3, places=4)
+
+    def test_missing_column_returns_none(self):
+        from src.pipeline.premarket_deep import _calc_avg_daily_amount_20d
+        import pandas as pd
+        df = pd.DataFrame({"收盘": [10.0] * 25})
+        self.assertIsNone(_calc_avg_daily_amount_20d(df))
+
+    def test_non_numeric_amount_returns_none(self):
+        # 全坏数据 → mean 为 NaN → None, 不产出伪值
+        from src.pipeline.premarket_deep import _calc_avg_daily_amount_20d
+        df = self._make_history(["坏数据"] * 25)
+        self.assertIsNone(_calc_avg_daily_amount_20d(df))
+
+    def test_end_to_end_with_guard(self):
+        # 生产者输出直接被 guard 正确消费(单位对齐验证)
+        from src.pipeline.premarket_deep import _calc_avg_daily_amount_20d
+        from src.engine.scorer import apply_liquidity_guard
+        high = self._make_history([2e8] * 25)
+        low = self._make_history([2e7] * 25)
+        candidates = [
+            {"code": "sh600000", "name": "甲", "score": 60,
+             "factors": {"avg_daily_amount_20d": _calc_avg_daily_amount_20d(high)}},
+            {"code": "sh600001", "name": "乙", "score": 55,
+             "factors": {"avg_daily_amount_20d": _calc_avg_daily_amount_20d(low)}},
+        ]
+        cfg = {"liquidity_guard": {"enabled": True, "min_daily_amount_yi": 0.5}}
+        result = apply_liquidity_guard(candidates, cfg)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["code"], "sh600000")
+
+
+class TestGuardExclusionsAudit(unittest.TestCase):
+    """2026-09-11 修复: guard 剔除清单此前只存在于内存/日志,
+    无法用 T+N 真实收益回查 guard 是避雷还是误杀。
+
+    验证 _apply_guards_with_audit 的 diff 归因 + guard_exclusions 表落库。
+    """
+
+    def _temp_db(self):
+        import tempfile
+        from src.data.database import StockDatabase
+        fd, path = tempfile.mkstemp(suffix=".db")
+        import os
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return StockDatabase(db_path=path), path
+
+    def _candidates(self):
+        # chip 高 z 票会被 chip_guard 剔除; 低流动性票被 liquidity_guard 剔除
+        return [
+            {"code": "sh600000", "name": "甲", "score": 60,
+             "z_scores": {"chip": 2.0, "ashare_specific": 1.0},
+             "sub_scores": {"ashare_specific": 60}, "factors": {"avg_daily_amount_20d": 2.0}},
+            {"code": "sh600001", "name": "乙", "score": 55,
+             "z_scores": {"chip": 0.0, "ashare_specific": 1.0},
+             "sub_scores": {"ashare_specific": 58}, "factors": {"avg_daily_amount_20d": 0.3}},
+            {"code": "sh600002", "name": "丙", "score": 57,
+             "z_scores": {"chip": 0.0, "ashare_specific": 1.0},
+             "sub_scores": {"ashare_specific": 57}, "factors": {"avg_daily_amount_20d": 2.0}},
+        ]
+
+    def _config(self):
+        # 只开 chip/liquidity 两个 guard, 排除 us/supply 等外部依赖
+        return {
+            "chip_guard": {"enabled": True, "z_threshold": 1.5},
+            "ashare_guard": {"enabled": False},
+            "us_sector_guard": {"enabled": False},
+            "supply_chain_guard": {"enabled": False},
+            "oversold_rebound_guard": {"enabled": False},
+            "liquidity_guard": {"enabled": True, "min_daily_amount_yi": 0.5},
+        }
+
+    def test_exclusions_persisted_with_correct_guard(self):
+        from src.pipeline.premarket_finalize import _apply_guards_with_audit
+        db, _ = self._temp_db()
+        kept = _apply_guards_with_audit(self._candidates(), self._config(), db=db)
+        # chip 剔甲, liquidity 剔乙, 丙保留
+        self.assertEqual([c["code"] for c in kept], ["sh600002"])
+        rows = db._fetch_all(
+            "SELECT code, guard_name, guard_reason FROM guard_exclusions ORDER BY code")
+        self.assertEqual(len(rows), 2)
+        by_code = {r["code"]: r for r in rows}
+        self.assertEqual(by_code["sh600000"]["guard_name"], "chip")
+        self.assertIn("获利盘", by_code["sh600000"]["guard_reason"])
+        self.assertEqual(by_code["sh600001"]["guard_name"], "liquidity")
+        self.assertIn("流动性不足", by_code["sh600001"]["guard_reason"])
+
+    def test_idempotent_rewrite(self):
+        # 同日重跑: UNIQUE(trade_date,code,guard_name)+OR REPLACE 不产生重复行
+        from src.pipeline.premarket_finalize import _apply_guards_with_audit
+        db, _ = self._temp_db()
+        _apply_guards_with_audit(self._candidates(), self._config(), db=db)
+        _apply_guards_with_audit(self._candidates(), self._config(), db=db)
+        rows = db._fetch_all(
+            "SELECT code, guard_name FROM guard_exclusions")
+        self.assertEqual(len(rows), 2)
+
+    def test_db_failure_does_not_break_chain(self):
+        # 落库失败只降级, 不影响 guard 主链路返回值
+        from src.pipeline.premarket_finalize import _apply_guards_with_audit
+
+        class _BrokenDB:
+            def save_guard_exclusions_batch(self, *a, **kw):
+                raise RuntimeError("db down")
+        kept = _apply_guards_with_audit(
+            self._candidates(), self._config(), db=_BrokenDB())
+        self.assertEqual([c["code"] for c in kept], ["sh600002"])
+
+
+class TestPolicyGuard(unittest.TestCase):
+    """2026-09-11 新增: 政策硬利空排除器(影子模式起步)。
+
+    数据流: PolicyEventFactor 检测新闻直接点名个股+硬利空关键词 →
+    events type=hard_negative → apply_policy_guard 消费。
+    """
+
+    def _factor(self):
+        from src.factors.policy_event import PolicyEventFactor
+        return PolicyEventFactor(asof=None)
+
+    def _news(self, content):
+        return [{"content": content, "title": "", "time": None}]
+
+    def test_hard_negative_event_emitted_on_direct_mention(self):
+        f = self._factor()
+        r = f._calculate_news_policy_impact(
+            "sh600000", self._news("某公司发布公告: 因涉嫌信息披露违法违规, 证监会决定对湖南黄金立案调查"),
+            stock_sector="", stock_concepts=[], stock_name="湖南黄金")
+        types = [e["type"] for e in r["events"]]
+        self.assertIn("hard_negative", types)
+
+    def test_no_event_without_direct_mention(self):
+        # 行业级利空不点名个股 → 不产生 hard_negative(不做行业传导级匹配)
+        f = self._factor()
+        r = f._calculate_news_policy_impact(
+            "sh600000", self._news("证监会宣布对多家公司立案调查, 湖南板块承压"),
+            stock_sector="", stock_concepts=[], stock_name="湖南黄金")
+        types = [e["type"] for e in r["events"]]
+        self.assertNotIn("hard_negative", types)
+
+    def test_no_event_for_soft_negative_words(self):
+        # 普通情绪词(利空/下跌)不触发 hard_negative(留给 major_negative 路径)
+        f = self._factor()
+        r = f._calculate_news_policy_impact(
+            "sh600000", self._news("湖南黄金今日大跌, 利空频出"),
+            stock_sector="", stock_concepts=[], stock_name="湖南黄金")
+        types = [e["type"] for e in r["events"]]
+        self.assertNotIn("hard_negative", types)
+
+    def _candidates(self):
+        return [
+            {"code": "sh600000", "name": "甲", "score": 60,
+             "sub_scores": {"ashare_specific": 60},
+             "factors": {"policy_events": [
+                 {"type": "hard_negative", "title": "证监会对甲立案调查", "impact": "high"}]}},
+            {"code": "sh600001", "name": "乙", "score": 55,
+             "sub_scores": {"ashare_specific": 58},
+             "factors": {"policy_events": []}},
+        ]
+
+    def test_shadow_mode_marks_but_keeps(self):
+        from src.engine.scorer import apply_policy_guard
+        cfg = {"policy_guard": {"enabled": True, "shadow": True}}
+        result = apply_policy_guard(self._candidates(), cfg)
+        self.assertEqual(len(result), 2, "影子模式不剔除")
+        self.assertIn("policy_shadow_reason", result[0])
+        self.assertNotIn("policy_shadow_reason", result[1])
+
+    def test_real_mode_excludes(self):
+        from src.engine.scorer import apply_policy_guard
+        cands = self._candidates()
+        cfg = {"policy_guard": {"enabled": True, "shadow": False}}
+        result = apply_policy_guard(cands, cfg)
+        self.assertEqual([c["code"] for c in result], ["sh600001"])
+        # 原地打标: 被剔除票带 guard_reason
+        self.assertIn("政策硬利空", cands[0].get("guard_reason", ""))
+
+    def test_disabled_returns_all(self):
+        from src.engine.scorer import apply_policy_guard
+        result = apply_policy_guard(self._candidates(), {})
+        self.assertEqual(len(result), 2)
+
+    def test_chain_persists_shadow_flags(self):
+        # 影子模式下 _apply_guards_with_audit 把打标票落库为 policy_shadow
+        from src.pipeline.premarket_finalize import _apply_guards_with_audit
+        import tempfile, os
+        from src.data.database import StockDatabase
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        db = StockDatabase(db_path=path)
+        cfg = {
+            "policy_guard": {"enabled": True, "shadow": True},
+            "chip_guard": {"enabled": False},
+            "ashare_guard": {"enabled": False},
+            "us_sector_guard": {"enabled": False},
+            "supply_chain_guard": {"enabled": False},
+            "oversold_rebound_guard": {"enabled": False},
+            "liquidity_guard": {"enabled": False},
+        }
+        kept = _apply_guards_with_audit(self._candidates(), cfg, db=db)
+        self.assertEqual(len(kept), 2)
+        rows = db._fetch_all(
+            "SELECT code, guard_name FROM guard_exclusions")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["guard_name"], "policy_shadow")
+        self.assertEqual(rows[0]["code"], "sh600000")
+
+
+class TestBatchNormalizeFullZScores(unittest.TestCase):
+    """2026-09-11 修复: 单因子架构下 batch_normalize 只给正权重维算 z,
+    chip_guard 的 z 分支自 08-27 起静默失效(实盘剔除全来自 pos_250 分支)。
+
+    修复后: z_scores 覆盖全部 sub_scores 维度; 评分仅加权正权重维(数值不变)。
+    """
+    def _candidates(self, n=6):
+        cands = []
+        for i in range(n):
+            cands.append({
+                "sub_scores": {
+                    "ashare_specific": 50 + i * 3,
+                    "chip": 40 + i * 10,  # 截面递增 → chip z 单调
+                    "oversold_rebound": 50,
+                },
+                "expectation_penalty": 0,
+            })
+        return cands
+
+    def test_z_scores_cover_all_dims(self):
+        from src.engine.scorer import StockScorer
+        cands = self._candidates()
+        weights = {"ashare_specific": 1.0, "chip": 0}
+        StockScorer.batch_normalize(cands, weights)
+        for c in cands:
+            self.assertIn("chip", c["z_scores"], "零权重维也应有截面z供guard消费")
+            self.assertIn("ashare_specific", c["z_scores"])
+        # 截面 chip 分单调递增 → 末位 z 应为正
+        self.assertGreater(cands[-1]["z_scores"]["chip"], 0)
+        self.assertLess(cands[0]["z_scores"]["chip"], 0)
+
+    def test_score_only_weights_positive_dims(self):
+        from src.engine.scorer import StockScorer
+        cands = self._candidates()
+        weights = {"ashare_specific": 1.0, "chip": 0}
+        StockScorer.batch_normalize(cands, weights)
+        # 评分只由 ashare_specific z 决定: score = 50 + z*(50/3)
+        z_ashare = cands[-1]["z_scores"]["ashare_specific"]
+        self.assertAlmostEqual(
+            cands[-1]["score"], 50 + z_ashare * (50 / 3), places=1)
+
+    def test_chip_guard_z_branch_revived(self):
+        # 修复前: chip z 恒缺失→0, z 分支永不触发; 修复后可正常剔除
+        from src.engine.scorer import StockScorer, apply_chip_guard
+        cands = [{
+            "code": f"sh60000{i:02d}", "name": f"股{i}",
+            "sub_scores": {"ashare_specific": 55, "chip": 40 + i * 10},
+            "expectation_penalty": 0,
+        } for i in range(10)]
+        StockScorer.batch_normalize(cands, {"ashare_specific": 1.0, "chip": 0})
+        guard_input = [{"code": c["code"], "name": c["name"],
+                        "z_scores": c["z_scores"], "factors": {}} for c in cands]
+        kept = apply_chip_guard(guard_input, {"chip_guard": {"enabled": True, "z_threshold": 1.5}})
+        # chip 最高的末位票应被剔除(10样本最大z≈1.63>1.5)
+        self.assertNotIn("sh600009", [c["code"] for c in kept])
+
+
+class TestEventCalendarCap(unittest.TestCase):
+    """2026-09-11 新增: 重大事件日历窗口防守(pre市场 max_recommend 封顶)。"""
+
+    def _cfg(self, events, enabled=True, default_cap=1):
+        return {"event_calendar": {
+            "enabled": enabled, "default_cap": default_cap, "events": events}}
+
+    def test_in_window_returns_cap(self):
+        from src.pipeline.premarket_finalize import _event_calendar_cap
+        cfg = self._cfg([{"name": "FOMC", "window": ["2026-09-15", "2026-09-17"]}])
+        cap, note = _event_calendar_cap(cfg, "2026-09-16")
+        self.assertEqual(cap, 1)
+        self.assertIn("FOMC", note)
+
+    def test_outside_window_returns_none(self):
+        from src.pipeline.premarket_finalize import _event_calendar_cap
+        cfg = self._cfg([{"name": "FOMC", "window": ["2026-09-15", "2026-09-17"]}])
+        cap, _ = _event_calendar_cap(cfg, "2026-09-11")
+        self.assertIsNone(cap)
+
+    def test_window_boundaries_inclusive(self):
+        from src.pipeline.premarket_finalize import _event_calendar_cap
+        cfg = self._cfg([{"name": "两会", "window": ["2027-03-04", "2027-03-11"]}])
+        for d in ("2027-03-04", "2027-03-11"):
+            cap, _ = _event_calendar_cap(cfg, d)
+            self.assertIsNotNone(cap, f"边界日{d}应命中")
+
+    def test_event_level_cap_overrides_default(self):
+        from src.pipeline.premarket_finalize import _event_calendar_cap
+        cfg = self._cfg([{"name": "FOMC", "window": ["2026-09-15", "2026-09-17"], "cap": 0}],
+                        default_cap=1)
+        cap, _ = _event_calendar_cap(cfg, "2026-09-16")
+        self.assertEqual(cap, 0)
+
+    def test_multiple_windows_take_min(self):
+        from src.pipeline.premarket_finalize import _event_calendar_cap
+        cfg = self._cfg([
+            {"name": "A会", "window": ["2026-12-08", "2026-12-12"], "cap": 1},
+            {"name": "B会", "window": ["2026-12-10", "2026-12-15"], "cap": 0},
+        ])
+        cap, note = _event_calendar_cap(cfg, "2026-12-11")
+        self.assertEqual(cap, 0)
+        self.assertIn("B会", note)
+
+    def test_disabled_returns_none(self):
+        from src.pipeline.premarket_finalize import _event_calendar_cap
+        cfg = self._cfg([{"name": "FOMC", "window": ["2026-09-15", "2026-09-17"]}],
+                        enabled=False)
+        cap, _ = _event_calendar_cap(cfg, "2026-09-16")
+        self.assertIsNone(cap)
+
+    def test_date_objects_tolerated(self):
+        # YAML 未加引号日期解析成 date 对象, 不得因类型比较 TypeError 被静默吞掉
+        import datetime as _dt
+        from src.pipeline.premarket_finalize import _event_calendar_cap
+        cfg = self._cfg([{"name": "FOMC", "window": [
+            _dt.date(2026, 9, 15), _dt.date(2026, 9, 17)]}])
+        cap, note = _event_calendar_cap(cfg, "2026-09-16")
+        self.assertEqual(cap, 1)
+        self.assertIn("FOMC", note)
+
+    def test_static_only_mode(self):
+        # fetch_auto=False 只用静态条目(离线测试入口)
+        from src.pipeline.premarket_finalize import _event_calendar_cap
+        cfg = self._cfg([{"name": "FOMC", "window": ["2026-09-15", "2026-09-17"]}])
+        cap, _ = _event_calendar_cap(cfg, "2026-09-16", fetch_auto=False)
+        self.assertEqual(cap, 1)
+
+
+class TestEventCalendarAuto(unittest.TestCase):
+    """2026-09-11 事件日历自动维护: FOMC解析/规律播种/三级合并。"""
+
+    # 内嵌官网HTML片段(2026-09 实抓结构核对), 受控测试数据非实时网络
+    _FOMC_HTML = """
+    <h4><a id="42828">2026 FOMC Meetings</a></h4></div>
+    <div class="row fomc-meeting" ">
+      <div class="fomc-meeting__month col-xs-5 col-sm-3 col-md-2"><strong>September</strong></div>
+      <div class="fomc-meeting__date col-xs-4 col-sm-9 col-md-10 col-lg-1">15-16*</div>
+    </div>
+    <div class="fomc-meeting--shaded row fomc-meeting" ">
+      <div class="fomc-meeting--shaded fomc-meeting__month col-xs-5 col-sm-3 col-md-2"><strong>October</strong></div>
+      <div class="fomc-meeting__date col-xs-4 col-sm-9 col-md-10 col-lg-1">27-28</div>
+    </div>
+    <h4><a id="42827">2025 FOMC Meetings</a></h4></div>
+    """
+
+    def test_parse_fomc_html(self):
+        from src.data.event_calendar import _parse_fomc_html
+        events = _parse_fomc_html(self._FOMC_HTML)
+        self.assertEqual(len(events), 2)
+        # 9月会议 15-16, 窗口=会议日+2(含决议落地与反应日)
+        self.assertEqual(events[0]["name"], "FOMCSeptember")
+        self.assertEqual(events[0]["window"], ["2026-09-15", "2026-09-18"])
+        self.assertEqual(events[1]["window"], ["2026-10-27", "2026-10-30"])
+
+    def test_parse_ignores_bad_dates(self):
+        from src.data.event_calendar import _parse_fomc_html
+        html = self._FOMC_HTML.replace("15-16*", "32-33")  # 非法日期
+        events = _parse_fomc_html(html)
+        self.assertEqual(len(events), 1)
+
+    def test_seed_recurring_events(self):
+        from src.data.event_calendar import seed_recurring_events
+        events = seed_recurring_events(year=2027)
+        names = {e["name"] for e in events}
+        self.assertIn("两会2027", names)
+        self.assertIn("中央经济工作会议2027", names)
+        by_name = {e["name"]: e["window"] for e in events}
+        self.assertEqual(by_name["两会2027"], ["2027-03-03", "2027-03-13"])
+        self.assertEqual(by_name["中央经济工作会议2027"], ["2027-12-08", "2027-12-16"])
+
+    def test_merge_static_overrides_auto(self):
+        # 静态条目与自动条目窗口重叠时, 自动条目被抑制(手工修正优先)
+        from src.data.event_calendar import merge_event_calendars
+        config = {"event_calendar": {
+            "enabled": True,
+            "events": [{"name": "中经会(手工)", "window": ["2026-12-08", "2026-12-10"]}],
+        }}
+        merged = merge_event_calendars(
+            config, today="2026-09-01", fetch_fomc=False)
+        # 手工条目与 seed 的中经会2026 窗口重叠 → 自动条目被抑制
+        # (两会2026 已过期被过滤, 9月不播种次年)
+        names = {e["name"] for e in merged}
+        self.assertEqual(names, {"中经会(手工)"})
+
+    def test_merge_includes_future_seeds(self):
+        from src.data.event_calendar import merge_event_calendars
+        config = {"event_calendar": {"enabled": True, "events": []}}
+        merged = merge_event_calendars(
+            config, today="2026-11-01", fetch_fomc=False)
+        # 11月: 当年12月中经会 + 次年两会(10月后跨年播种)都在未来窗口
+        names = {e["name"] for e in merged}
+        self.assertIn("中央经济工作会议2026", names)
+        self.assertIn("两会2027", names)
+
+    def test_merge_expired_events_filtered(self):
+        from src.data.event_calendar import merge_event_calendars
+        config = {"event_calendar": {
+            "enabled": True,
+            "events": [{"name": "旧事件", "window": ["2026-01-01", "2026-01-05"]}],
+        }}
+        merged = merge_event_calendars(
+            config, today="2026-09-11", fetch_fomc=False)
+        # 过期静态事件被过滤; seed 的中经会2026(12月)在未来, 应保留
+        names = {e["name"] for e in merged}
+        self.assertNotIn("旧事件", names)
+        self.assertIn("中央经济工作会议2026", names)
+
+    def test_auto_fomc_disabled(self):
+        from src.data.event_calendar import merge_event_calendars
+        config = {"event_calendar": {
+            "enabled": True, "auto_fomc": False, "events": [],
+        }}
+        # auto_fomc=False 不触发抓取(无网络调用), 只有规律播种
+        merged = merge_event_calendars(config, today="2026-09-11", fetch_fomc=False)
+        names = {e["name"] for e in merged}
+        self.assertNotIn("FOMCSeptember", names)
+
+
+class TestPolitburoNewsDetect(unittest.TestCase):
+    """政治局会议新闻检测(影子模式): 前向词过滤。"""
+
+    def _factor(self):
+        from src.factors.policy_event import PolicyEventFactor
+        return PolicyEventFactor(asof=None)
+
+    def test_upcoming_meeting_detected(self):
+        f = self._factor()
+        hit = f._detect_politburo_upcoming([
+            {"content": "新华社北京电 中共中央政治局会议将于下周一召开", "title": ""}])
+        self.assertTrue(hit)
+
+    def test_retrospective_not_detected(self):
+        f = self._factor()
+        hit = f._detect_politburo_upcoming([
+            {"content": "昨日召开的中央政治局会议强调...", "title": ""}])
+        self.assertEqual(hit, "")
+
+    def test_signal_flows_into_calculate(self):
+        # 集成: calculate 首次调用检测并写入 signals + 实例属性
+        f = self._factor()
+        r = f.calculate(
+            "sh600000", [{"content": "政治局会议即将召开, 分析称...", "title": ""}],
+            stock_name="某股")
+        self.assertTrue(any(s.startswith("事件日历: ") for s in r["signals"]))
+        self.assertTrue(hasattr(f, "politburo_upcoming"))
+        # 二次调用不重复检测(实例缓存)
+        r2 = f.calculate("sh600000", [], stock_name="某股")
+        self.assertFalse(any(s.startswith("事件日历: ") for s in r2["signals"]))
+
+    def test_aggregate_from_scored_stocks(self):
+        from src.pipeline.premarket_finalize import _detect_politburo_in_signals
+        stocks = [
+            {"code": "sh600001", "factors": {"policy_signals": ["无关信号"]}},
+            {"code": "sh600002", "factors": {"policy_signals": [
+                "事件日历: 政治局会议将于下周一召开"]}},
+        ]
+        hit = _detect_politburo_in_signals(stocks)
+        self.assertIn("政治局会议", hit)
+        self.assertEqual(_detect_politburo_in_signals(
+            [{"code": "x", "factors": {}}]), "")
 
 
 if __name__ == "__main__":

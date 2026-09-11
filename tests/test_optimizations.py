@@ -127,8 +127,10 @@ class TestBacktestCosts(unittest.TestCase):
         return eng, trades
 
     def test_costs_reduce_pnl(self):
-        _, trades_free = self._make_trades(commission_rate=0, stamp_tax=0, slippage=0)
-        _, trades_cost = self._make_trades()
+        # guard_config={} 关闭实盘 guard 链(合成数据成交额低于流动性阈值会被全剔)
+        _, trades_free = self._make_trades(
+            commission_rate=0, stamp_tax=0, slippage=0, guard_config={})
+        _, trades_cost = self._make_trades(guard_config={})
         pnl_free = sum(t["pnl"] for t in trades_free)
         pnl_cost = sum(t["pnl"] for t in trades_cost)
         self.assertLess(pnl_cost, pnl_free)

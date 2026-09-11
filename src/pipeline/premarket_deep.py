@@ -153,11 +153,16 @@ def _calc_one_stock(ctx, idx, cand):
     history = history_cache.get(stock_code)
     if history is None:
         history = market_fetcher.get_stock_history(stock_code, days=120)
-    if history.empty or len(history) < 20:
+    if history is None or history.empty or len(history) < 20:
         print("      ⚠️ 历史数据不足，跳过")
         return "skip"
 
     all_factors = {}
+    # 20日日均成交额(亿元): liquidity_guard 消费字段
+    # 2026-09-11 修复: 原生产者随未提交改动丢失, guard 连续10天空转(见 logs/2026-09-*)
+    amt_yi = _calc_avg_daily_amount_20d(history)
+    if amt_yi is not None:
+        all_factors["avg_daily_amount_20d"] = amt_yi
     _calc_tech_block(ctx, cand, history, all_factors)
     _calc_sustain_block(ctx, cand, history, all_factors)
     _calc_sentiment_event_block(ctx, cand, history, all_factors)
@@ -534,4 +539,21 @@ def _pm_deep_loop(ctx):
 
     print(f"  共计算 {len(scored_stocks)} 只股票的因子")
     _pack(ctx, dict(locals()))
-    ctx["config"] = config
+    ctx['config'] = config
+
+
+def _calc_avg_daily_amount_20d(history):
+    """20日日均成交额(亿元), apply_liquidity_guard 消费。
+
+    K线"成交额"列单位为元(腾讯主源 row[6]万元*10000 / 新浪备源 close*volume,
+    两源口径一致, 见 kline_fetcher.py), 除以 1e8 转亿元与 guard 阈值对齐。
+    数据不可用时返回 None——guard 侧对缺字段有跳过+warning 语义, 此处不造数。
+
+    单元测试: tests/test_bugfixes.py::test_avg_daily_amount_20d_producer
+    """
+    if history is None or history.empty or "成交额" not in history.columns:
+        return None
+    amt = pd.to_numeric(history["成交额"], errors="coerce").tail(20).mean()
+    if pd.notna(amt) and amt > 0:
+        return round(float(amt) / 1e8, 4)
+    return None

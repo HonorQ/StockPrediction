@@ -19,7 +19,7 @@
     "interact_7"
   ],
   "model_type": "ensemble",
-  "trained_at": "2026-08-28 16:11:20",
+  "trained_at": "2026-09-10 07:05:54",
   "keep_index": [
     0,
     1,
@@ -40,14 +40,14 @@
     42
   ],
   "metrics": {
-    "accuracy": 0.532,
-    "train_accuracy": 0.752,
-    "precision": 0.587,
-    "recall": 0.457,
-    "f1_score": 0.514,
-    "train_samples": 904,
-    "val_samples": 298,
-    "test_samples": 299,
+    "accuracy": 0.426,
+    "train_accuracy": 0.765,
+    "precision": 0.419,
+    "recall": 0.582,
+    "f1_score": 0.487,
+    "train_samples": 634,
+    "val_samples": 209,
+    "test_samples": 209,
     "top_features": [
       [
         "rsi_14",

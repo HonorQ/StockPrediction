@@ -29,7 +29,7 @@ class BacktestEngine:
 
     def __init__(self, initial_capital: float = 100000,
                  commission_rate: float = 0.0003, stamp_tax: float = 0.0005,
-                 slippage: float = 0.001):
+                 slippage: float = 0.001, guard_config: Optional[Dict] = None):
         self.initial_capital = initial_capital
         # A股交易成本：佣金万2.5(双边,最低5元)、印花税卖出0.05%、滑点单边0.1%。
         # 零成本假设会把短线策略的收益系统性高估
@@ -38,6 +38,29 @@ class BacktestEngine:
         self.slippage = slippage
         # 回测覆盖的真实交易日数，由 _simulate_holding 统计（年化/Sharpe 用）
         self.trading_day_count = 0
+        # guard 配置注入点: None=从 config.yaml 加载(与实盘同阈值);
+        # 传入 dict(如 {}) 可在机械性单测中关闭 guard, 不读盘。
+        self._guard_cfg_cache = guard_config
+
+    def _guard_config(self) -> Dict:
+        """加载 config.yaml 的 *_guard 配置段(延迟一次, 供 _simulate_holding
+        复用实盘 guard 函数与阈值)。加载失败返回空 dict → guard 不生效,
+        回测仍可运行(降级语义与实盘一致)。"""
+        if self._guard_cfg_cache is not None:
+            return self._guard_cfg_cache
+        try:
+            import yaml
+            cfg_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "..", "config.yaml")
+            with open(cfg_path, encoding="utf-8") as f:
+                full = yaml.safe_load(f) or {}
+            self._guard_cfg_cache = {k: v for k, v in full.items()
+                                     if k.endswith("_guard")}
+        except Exception as e:
+            logger.warning("回测加载guard配置失败, 本轮guard不生效: %s", e)
+            self._guard_cfg_cache = {}
+        return self._guard_cfg_cache
 
     def _trade_costs(self, buy_amount: float, sell_amount: float) -> float:
         """一笔完整交易的总摩擦成本（佣金双边+印花税卖出+滑点已计入价格）"""
@@ -467,24 +490,31 @@ class BacktestEngine:
             qualified = [s for s in group if s["score"] >= entry_score]
             qualified.sort(key=lambda x: -x["score"])
 
-            # ashare_guard: 排除截面 ashare_specific z-score 最低 10%(与实盘同口径)
-            # 依据: 2026-08 组合模拟A/B, hold=5 空头年化+8.8%/胜率60.9%, alpha在空头端
-            if len(qualified) >= 10:
-                exclude_n = max(1, int(len(qualified) * 0.10))
-                by_ashare = sorted(qualified,
-                                  key=lambda x: (x.get("z_scores") or {}).get("ashare_specific", 0) or 0)
-                excluded_codes = {s["stock_code"] for s in by_ashare[:exclude_n]}
-                qualified = [s for s in qualified if s["stock_code"] not in excluded_codes]
-
-            # oversold_rebound_guard: 排除截面 oversold_rebound z-score 最高 10%(与实盘同口径)
-            # 依据: 2026-08 分层分析, Q10-Q1=-42.1bp/t=-1.98, 高分位反而跌
-            if len(qualified) >= 10:
-                exclude_n = max(1, int(len(qualified) * 0.10))
-                by_rebound = sorted(qualified,
-                                   key=lambda x: (x.get("z_scores") or {}).get("oversold_rebound", 0) or 0,
-                                   reverse=True)
-                excluded_codes = {s["stock_code"] for s in by_rebound[:exclude_n]}
-                qualified = [s for s in qualified if s["stock_code"] not in excluded_codes]
+            # === 风控排除(2026-09-11): 直接复用实盘 guard 函数与 config 阈值,
+            # 消除手写复现与实盘的代码漂移(AGENTS.md"回测与实盘共用同一评分链路")。
+            # 回测因子为K线可重建子集: 缺字段的 guard 按各自降级语义跳过
+            # (与实盘一致), 不造数。policy/us_sector/supply_chain 依赖新闻与
+            # 美股历史数据, 回测无法重建, 诚实缺席。
+            if len(qualified) >= 2:
+                from src.engine.scorer import (
+                    apply_chip_guard, apply_ashare_guard,
+                    apply_oversold_rebound_guard, apply_liquidity_guard)
+                guard_cfg = self._guard_config()
+                if guard_cfg:
+                    cand_views = [{
+                        "code": s["stock_code"], "name": s.get("stock_name", ""),
+                        "score": s["score"],
+                        "z_scores": s.get("z_scores") or {},
+                        "factors": s.get("factors") or {},
+                        "sub_scores": s.get("sub_scores") or {},
+                    } for s in qualified]
+                    kept = apply_chip_guard(cand_views, guard_cfg)
+                    kept = apply_ashare_guard(kept, guard_cfg)
+                    kept = apply_oversold_rebound_guard(kept, guard_cfg)
+                    kept = apply_liquidity_guard(kept, guard_cfg)
+                    kept_codes = {c["code"] for c in kept}
+                    qualified = [s for s in qualified
+                                 if s["stock_code"] in kept_codes]
 
             picks = qualified[:top_n]
 
@@ -645,6 +675,17 @@ class BacktestEngine:
 
         chip_col = "收盘" if "收盘" in window.columns else "close"
         factors["chip_avg_cost"] = float(window[chip_col].mean())
+        # 20日日均成交额(亿元): liquidity_guard 消费, 与实盘
+        # premarket_deep._calc_avg_daily_amount_20d 同口径(元→亿元)
+        amt_col = "成交额" if "成交额" in window.columns else (
+            "amount" if "amount" in window.columns else None)
+        if amt_col is not None:
+            try:
+                amt = float(window[amt_col].tail(20).mean())
+                if amt > 0:
+                    factors["avg_daily_amount_20d"] = round(amt / 1e8, 4)
+            except (TypeError, ValueError):
+                pass
         return factors
 
     def _calculate_results(self, trades: List[Dict]) -> Dict:
