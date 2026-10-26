@@ -596,13 +596,18 @@ def _am_report(ctx):
 
 
 def run_afternoon(config):
-    """午后模式主入口：初始化 → 修正评分 → 筛选落库 → 报告。"""
+    """午后模式主入口：初始化 → 修正评分 → 筛选落库 → 报告。
+
+    返回 False = 前置条件缺失(如盘前缓存未生成)而空跑, 调用方需记为失败,
+    否则计划任务静默失效而心跳全绿(2026-09-14 实际发生过)。
+    """
     ctx = {"config": config}
     if not _am_init(ctx):
-        return
+        return False
     _am_rescore(ctx)
     _am_filter_persist(ctx)
     _am_report(ctx)
+    return True
 
 
 # ======================================================================

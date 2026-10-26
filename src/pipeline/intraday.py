@@ -231,13 +231,14 @@ def run_intraday(config):
     if cache is None:
         print(f"  ❌ 未找到盘前缓存 cache/premarket_{today}.json")
         print("  → 请先运行盘前模式: python run_daily.py --premarket")
-        return
+        # 返回 False: 空跑不得被记为"成功", 否则计划任务静默失效无人察觉
+        return False
 
     print(f"  ✅ 载入盘前候选池: {len(cache['candidates'])} 只 (计算于 {cache['run_at']})")
 
     ctx = {"config": config, "today": today, "cache": cache}
     if _id_snapshot_and_crash(ctx) is None:
-        return
+        return False
     _id_alerts_and_rescore(ctx)
     updated = ctx["updated"]
     excluded = ctx["excluded"]
@@ -278,6 +279,7 @@ def run_intraday(config):
     print(f"  报告文件: {report_path}")
     print("  💡 买入决策请以 14:40 午后《尾盘最终决策版》为准")
     print("=" * 60)
+    return True
 
 
 # ======================================================================

@@ -141,13 +141,18 @@ if __name__ == "__main__":
             config.setdefault("factor_ic", {})["lookback_days"] = args.lookback
             run_factor_ic(config)
         elif args.intraday:
-            run_intraday(config)
+            completed = run_intraday(config)
         elif args.afternoon:
-            run_afternoon(config)
+            completed = run_afternoon(config)
         else:
             # 默认走盘前模式
-            run_premarket(config)
-        _write_heartbeat(mode, status="ok")
+            completed = run_premarket(config)
+        # 函数显式返回 False = 前置条件缺失而空跑(如盘前缓存未生成)。
+        # 这种"静默未执行"必须落成 failed, 否则心跳全绿而当天实际无产出。
+        if completed is False:
+            _write_heartbeat(mode, status="failed", error="前置盘前缓存缺失, 任务未执行")
+        else:
+            _write_heartbeat(mode, status="ok")
     except SystemExit:
         raise
     except Exception as e:
