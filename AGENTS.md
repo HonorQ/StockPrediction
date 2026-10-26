@@ -89,10 +89,18 @@ src/utils (helpers/log/heartbeat/proxy_manager 无业务语义的工具)
 
 ## 五、数据与研究纪律
 
-- K线缓存(cache/klines, cache/bt_kline_*)是一切研究的地基, 断点安全, 定期补齐:
-  `python -u scripts\fetch_1year_data.py`
+- K线缓存(cache/klines)是一切研究的地基, 断点安全, 定期补齐:
+  `python -u scripts\backfill_missing_klines.py` (akshare/东财源, 全市场
+  约 5200 只约 17 分钟, 含换手率, 运行结束自动生成 `_code_index.json`)。
+  旧入口 fetch_1year_data.py(baostock) 已持续限流不可用, 仅留档。
+  ⚠ 缓存只装股票(60/00/30/68): 指数(sh.000xxx)与ETF(sh.5xxxxx/sz.1xxxxx)
+  曾因旧脚本过滤缺陷被当作股票抓入(616个), 已移入 cache/klines_nonstock/。
+  ⚠ 缓存对已有 >=200 行的股票直接跳过 —— "加满即冻结", 不会随交易日推进
+  自动更新; 跨午间抓取还会留下半日bar(见 2026-10-16 事件)。**重建面板前
+  必须先刷新缓存尾部**, 否则面板截止于旧日期且末根bar失真。
 - 因子有效性结论以 `reports/market_ic_verdict.json`(全市场每日截面)为准;
   候选池小样本(284只)存在幸存者偏差, 结论只能作参考。
+  刷 verdict: `python scripts\rebuild_market_panel.py`(先跑上面的补抓)。
 - 新因子上线路径: 面板IC → 十分位分层(scripts/quantile_analysis.py)
   → 单边组合模拟 → 影子运行 → 转正。跳步需要说明理由。
 - 回测与实盘共用同一评分链路(batch_normalize/overlay/guard),
@@ -101,6 +109,9 @@ src/utils (helpers/log/heartbeat/proxy_manager 无业务语义的工具)
 ## 六、运维
 
 - 计划任务三个时点: 07:00 premarket / 09:25 intraday / 14:40 afternoon(最终推荐)。
+- 16:40 StockPrediction_ShadowRebound: 72.5档影子追踪(`scripts\shadow_rebound_track.py`
+  → `run_shadow_rebound.bat`, 独立库 data/shadow_rebound.db, 日志 logs/shadow_rebound.log,
+  产物 reports/shadow_rebound_latest.json), 与生产链路完全隔离, 不参与推荐。
 - 心跳: logs/heartbeat.json; 异常会在下次报告横幅出现(check_task_alerts)。
 - 报告产物 reports/daily/YYYY-MM-DD.html, 午后版覆盖同名盘前版(设计如此)。
 - 推送失败先查系统残留代理(127.0.0.1:7897): `git -c http.proxy="" push`。
@@ -125,6 +136,9 @@ src/utils (helpers/log/heartbeat/proxy_manager 无业务语义的工具)
 > - 新增: scripts/weekly_health_check.py(每周胜率监控)
 > - 新增: scripts/recalibrate_by_winrate.py(胜率校准工具)
 
+- [ ] K线缓存冻结: `backfill_missing_klines.py` 对已有 >=200 行的股票跳过,
+      缓存不随交易日推进更新, 跨午间抓取还会留下半日bar(10-16 事件)。
+      重建面板前必须先刷新缓存尾部, 否则研究数据截止于旧日期。
 - [ ] 换手率备源: 腾讯/新浪K线接口无换手率字段, 依赖 baostock 逐股补充
       (cache/turnover 7天缓存+10秒超时兜底, 首次冷启动/缓存过期仍有延迟,
       根因是数据源限制非代码缺陷, 标记为"已缓解")

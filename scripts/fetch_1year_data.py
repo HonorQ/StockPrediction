@@ -2,6 +2,10 @@
 拉取1年历史数据脚本
 
 使用baostock拉取A股股票的历史K线数据，用于训练和回测。
+
+[2026-10-16 终审] baostock 已持续限流(login 半死/10002007), 批量抓取请改用
+scripts/backfill_missing_klines.py (akshare/东财源, 0.1s/只, 含换手率)。
+本脚本保留为历史入口, 过滤逻辑已修复(不再把指数/ETF当股票)。
 """
 import logging
 import os
@@ -50,16 +54,14 @@ def get_stock_list():
                 code = row[0]
                 name = row[1] if len(row) > 1 else ""
                 
-                # 排除北交所(bj)
-                if code.startswith("bj"):
+                # 白名单: 仅沪主板60/深主板00 才是股票。
+                # 2026-10-16 终审: 旧逻辑只排除 bj/688/300/301, 漏排指数
+                # (sh.000xxx)与ETF/LOF基金(sh.5xxxxx/sz.1xxxxx); baostock 列表
+                # 按代码排序, 这些代码排最前, 顺序抓取先抓完非股票段就被限流
+                # —— 曾产出的"成功"缓存 616 个全是指数与 ETF, 真股票为 0。
+                if not code.startswith(("sh.60", "sz.00")):
                     continue
-                # 排除科创板(688)
-                if code.startswith("sh.688"):
-                    continue
-                # 排除创业板(300/301)
-                if code.startswith("sz.300") or code.startswith("sz.301"):
-                    continue
-                
+
                 stocks.append((code, name))
             
             if stocks:
