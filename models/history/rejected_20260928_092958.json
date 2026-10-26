@@ -1,0 +1,58 @@
+{
+  "accuracy": 0.511,
+  "train_accuracy": 0.769,
+  "test_auc": 0.4494,
+  "precision": 0.25,
+  "recall": 0.188,
+  "f1_score": 0.214,
+  "train_samples": 143,
+  "val_samples": 45,
+  "test_samples": 45,
+  "top_features": [
+    [
+      "rsi_14",
+      "111"
+    ],
+    [
+      "rsi_6",
+      "51"
+    ],
+    [
+      "position_score",
+      "50"
+    ],
+    [
+      "mean_reversion_score",
+      "33"
+    ],
+    [
+      "oversold_rebound_score",
+      "32"
+    ],
+    [
+      "interact_6",
+      "27"
+    ],
+    [
+      "quant_score",
+      "26"
+    ],
+    [
+      "limit_up_20d",
+      "21"
+    ],
+    [
+      "volatility_score",
+      "18"
+    ],
+    [
+      "strategy_count",
+      "15"
+    ]
+  ],
+  "model_saved": "C:\\Users\\EDY\\Desktop\\StockPrediction\\models\\stock_selector.pkl",
+  "model_type": "ensemble",
+  "validation": "time_split_3way",
+  "rejected": true,
+  "reject_reason": "test_auc=0.4494 < 0.5"
+}

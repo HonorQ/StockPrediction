@@ -1,0 +1,97 @@
+{
+  "feature_names": [
+    "rsi_6",
+    "rsi_14",
+    "macd_golden_cross",
+    "ma_bullish",
+    "breakout_20d_high",
+    "volume_price_up",
+    "strategy_count",
+    "oversold_rebound_score",
+    "mean_reversion_score",
+    "volatility_score",
+    "quant_score",
+    "limit_up_20d",
+    "interact_0",
+    "interact_1",
+    "interact_3",
+    "interact_6",
+    "interact_7"
+  ],
+  "model_type": "ensemble",
+  "trained_at": "2026-09-14 11:39:42",
+  "keep_index": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    18,
+    23,
+    24,
+    26,
+    33,
+    35,
+    36,
+    38,
+    41,
+    42
+  ],
+  "metrics": {
+    "accuracy": 0.413,
+    "train_accuracy": 0.81,
+    "precision": 0.365,
+    "recall": 0.525,
+    "f1_score": 0.431,
+    "train_samples": 574,
+    "val_samples": 189,
+    "test_samples": 189,
+    "top_features": [
+      [
+        "rsi_14",
+        "502"
+      ],
+      [
+        "rsi_6",
+        "434"
+      ],
+      [
+        "quant_score",
+        "89"
+      ],
+      [
+        "volatility_score",
+        "87"
+      ],
+      [
+        "strategy_count",
+        "84"
+      ],
+      [
+        "oversold_rebound_score",
+        "79"
+      ],
+      [
+        "mean_reversion_score",
+        "75"
+      ],
+      [
+        "limit_up_20d",
+        "46"
+      ],
+      [
+        "ma_bullish",
+        "40"
+      ],
+      [
+        "interact_1",
+        "24"
+      ]
+    ],
+    "model_saved": "C:\\Users\\EDY\\Desktop\\StockPrediction\\models\\stock_selector.pkl",
+    "model_type": "ensemble",
+    "validation": "time_split_3way"
+  }
+}

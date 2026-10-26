@@ -7,19 +7,26 @@
     "breakout_20d_high",
     "volume_price_up",
     "strategy_count",
+    "relative_strength_5d",
+    "relative_strength_20d",
     "oversold_rebound_score",
     "mean_reversion_score",
     "volatility_score",
+    "position_score",
     "quant_score",
     "limit_up_20d",
     "interact_0",
     "interact_1",
+    "interact_2",
     "interact_3",
+    "interact_4",
+    "interact_5",
     "interact_6",
-    "interact_7"
+    "interact_7",
+    "interact_8"
   ],
   "model_type": "ensemble",
-  "trained_at": "2026-09-11 11:03:21",
+  "trained_at": "2026-09-21 07:04:02",
   "keep_index": [
     0,
     1,
@@ -28,27 +35,78 @@
     4,
     5,
     6,
+    16,
+    17,
     18,
     23,
     24,
+    25,
     26,
     33,
     35,
     36,
+    37,
     38,
+    39,
+    40,
     41,
-    42
+    42,
+    43
   ],
   "metrics": {
-    "accuracy": 0.437,
-    "train_accuracy": 0.762,
-    "precision": 0.402,
-    "recall": 0.528,
-    "f1_score": 0.456,
-    "train_samples": 604,
-    "val_samples": 199,
-    "test_samples": 199,
+    "accuracy": 0.48,
+    "train_accuracy": 0.832,
+    "test_auc": 0.506,
+    "precision": 0.313,
+    "recall": 0.512,
+    "f1_score": 0.389,
+    "train_samples": 387,
+    "val_samples": 126,
+    "test_samples": 127,
     "top_features": [
       [
+        "rsi_6",
+        "286"
+      ],
+      [
         "rsi_14",
-        
+        "184"
+      ],
+      [
+        "oversold_rebound_score",
+        "71"
+      ],
+      [
+        "strategy_count",
+        "67"
+      ],
+      [
+        "quant_score",
+        "60"
+      ],
+      [
+        "limit_up_20d",
+        "59"
+      ],
+      [
+        "mean_reversion_score",
+        "53"
+      ],
+      [
+        "interact_3",
+        "30"
+      ],
+      [
+        "position_score",
+        "28"
+      ],
+      [
+        "ma_bullish",
+        "25"
+      ]
+    ],
+    "model_saved": "C:\\Users\\EDY\\Desktop\\StockPrediction\\models\\stock_selector.pkl",
+    "model_type": "ensemble",
+    "validation": "time_split_3way"
+  }
+}
