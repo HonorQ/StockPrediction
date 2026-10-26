@@ -13,10 +13,13 @@
   - backtest T+1 开盘成交 + 并发仓位约束 + 绩效指标口径
   - liquidity_guard avg_daily_amount_20d 字段缺失不误杀(2026-08-31)
 """
+import json
 import os
 import sys
+import tempfile
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -1036,5 +1039,622 @@ class TestPolitburoNewsDetect(unittest.TestCase):
             [{"code": "x", "factors": {}}]), "")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestTencentKlineHostFailover(unittest.TestCase):
+    """2026-09-14: web.ifzq.gtimg.cn 被腾讯WAF返回501(HTML), 主域名必须自动切备域名。
+
+    故障表现: resp.json() 抛 "Expecting value: line 1 column 1", 盘前整轮K线全灭。
+    """
+
+    class _Resp:
+        def __init__(self, text):
+            self._text = text
+
+        def json(self):
+            return json.loads(self._text)
+
+    def setUp(self):
+        import src.data.kline_fetcher as kf
+        self.kf = kf
+        kf.KlineFetcher._host_fail.clear()
+
+    def test_waf_html_falls_back_to_backup_host(self):
+        calls = []
+        ok_payload = json.dumps({"data": {"bj830799": {"qfqday": [
+            ["2026-09-10", "10.0", "10.5", "10.6", "9.9", "1000", "10500"],
+            ["2026-09-11", "10.5", "10.8", "10.9", "10.4", "1200", "12960"],
+        ]}}})
+
+        def _fake_get(url, **kw):
+            calls.append(url)
+            return self._Resp("<html>waf</html>" if "web.ifzq" in url else ok_payload)
+
+        # 用北交所代码: 避免 _supplement_turnover 触发 baostock(离线测试禁止联网)
+        with patch.object(self.kf.requests, "get", _fake_get):
+            df = self.kf.KlineFetcher().get_stock_history("830799", days=5)
+        self.assertIsNotNone(df)
+        self.assertEqual(len(df), 2)
+        self.assertEqual(len(calls), 2)  # 主域名失败后切备用域名
+
+    def test_dead_host_skipped_after_repeated_failures(self):
+        """连续失败的域名不再重复请求, 避免持续触发WAF并刷屏"""
+        self.kf.KlineFetcher._host_fail["web.ifzq.gtimg.cn"] = 3
+        hosts = self.kf.KlineFetcher._tencent_hosts()
+        self.assertNotIn("web.ifzq.gtimg.cn", hosts)
+        self.assertIn("ifzq.gtimg.cn", hosts)
+
+
+class TestMoneyFlowContinuityContract(unittest.TestCase):
+    """2026-09-14: MoneyFlowContinuity 用单日快照dict当序列用, 每只票必抛
+    "'dict' object has no attribute 'empty'", 资金流连续性因子长期失效。"""
+
+    def _analyze(self, klines):
+        from src.data.money_flow import MoneyFlowFetcher
+        from src.factors.phase2_market_intel import MoneyFlowContinuity
+        with patch.object(MoneyFlowFetcher, "_fetch_em_fflow_klines",
+                          lambda self, c, s: klines):
+            return MoneyFlowContinuity(money_fetcher=MoneyFlowFetcher()).analyze("002001")
+
+    def test_unavailable_source_returns_neutral(self):
+        r = self._analyze(None)
+        self.assertEqual(r["flow_continuity_score"], 50)
+        self.assertEqual(r["flow_continuity"], "neutral")
+
+    def test_five_day_inflow_scored(self):
+        klines = [f"2026-09-0{i},1e8,2e8,3e8,4e8,5e8,6.0" for i in range(1, 6)]
+        r = self._analyze(klines)
+        self.assertEqual(r["flow_continuity"], "strong_inflow")
+        self.assertEqual(r["flow_continuity_score"], 85)
+
+
+class TestExpiredCloseBeforeMarketClose(unittest.TestCase):
+    """2026-09-14: 盘前/盘中不存在当日收盘价, 到期检查应静默等待而非刷"顺延平仓"。"""
+
+    def test_intraday_returns_not_due(self):
+        from src.engine.paper_trade_ops import _try_close_expired
+
+        class _NoPriceFetcher:
+            def get_stock_history(self, code, days=120):
+                return None
+
+        trade = {"id": 1, "code": "002001", "name": "测试票",
+                 "trade_date": "2026-09-01", "entry_date": "2026-09-01",
+                 "entry_price": 10.0}
+        with patch("src.engine.paper_trade_ops._is_before_market_close", lambda: True):
+            # db 传 None: 盘中未平仓, 不应触发任何落库
+            status = _try_close_expired(None, _NoPriceFetcher(), trade, 3, "2026-09-11")
+        self.assertEqual(status, "not_due")
+
+
+class TestMLModelMetaNumpy(unittest.TestCase):
+    """2026-09-14: meta.json 写入含 numpy int32 的 metrics 抛
+    "Object of type int32 is not JSON serializable", 整轮重训练结果丢失。"""
+
+    def test_numpy_metrics_serialized(self):
+        from src.engine.ml_selector import MLStockSelector
+        path = os.path.join(tempfile.gettempdir(), "test_ml_meta_numpy.pkl")
+        sel = MLStockSelector(model_path=path)
+        sel.model = "dummy"
+        sel._save_model_versioned({"n_samples": np.int32(120), "acc": np.float32(0.58)})
+        with open(sel.model_meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        self.assertEqual(meta["metrics"]["n_samples"], "120")
+
+
+class TestConceptSyncCircuitBreaker(unittest.TestCase):
+    """2026-09-14: 东财不可达时概念同步逐个板块重试(400+ × 5s), 实测空转30分钟且
+    用空结果覆盖已有缓存。必须熔断 + 不写空缓存。"""
+
+    def setUp(self):
+        import akshare as ak
+        self.ak = ak
+        self.config = os.path.join(tempfile.gettempdir(), "test_concept_map.json")
+        if os.path.exists(self.config):
+            os.remove(self.config)
+        self.cache = self.config + ".auto.json"
+        if os.path.exists(self.cache):
+            os.remove(self.cache)
+
+    def tearDown(self):
+        for p in (self.config, self.cache):
+            if os.path.exists(p):
+                os.remove(p)
+
+    def test_aborts_after_fail_streak(self):
+        calls = []
+
+        def _cons(symbol):
+            calls.append(symbol)
+            raise OSError("RemoteDisconnected")
+
+        from src.data.concept_map import ConceptMap
+        with patch.object(self.ak, "stock_board_concept_name_em",
+                          return_value=pd.DataFrame({"板块名称": [f"板块{i}" for i in range(20)]})), \
+             patch.object(self.ak, "stock_board_concept_cons_em", side_effect=_cons):
+            ok = ConceptMap(config_path=self.config, auto_sync=False).maybe_sync_from_akshare(force=True)
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), ConceptMap.SYNC_FAIL_STREAK)  # 熔断而非跑满20个
+        self.assertFalse(os.path.exists(self.cache))  # 空结果不得覆盖缓存
+
+    def test_board_list_timeout_aborts(self):
+        from src.data.concept_map import ConceptMap
+
+        def _hang():
+            import time as _t
+            _t.sleep(30)
+            return pd.DataFrame()
+
+        with patch.object(self.ak, "stock_board_concept_name_em", side_effect=_hang), \
+             patch.object(ConceptMap, "SYNC_TIMEOUT", 1):
+            ok = ConceptMap(config_path=self.config, auto_sync=False).maybe_sync_from_akshare(force=True)
+        self.assertFalse(ok)
+
+
+class TestIntelFactorSourceCooldown(unittest.TestCase):
+    """2026-09-14: 机构调研(48次)/龙虎榜(14次)在东财不可达时对每只候选股重跑全量请求,
+    且机构持仓报告期硬编码含"20051"(2005年一季度)。必须缓存+熔断+修正报告期。"""
+
+    def setUp(self):
+        from src.factors.phase2_market_intel import InstitutionalResearch, DragonTigerBoard
+        self.IR = InstitutionalResearch
+        self.DTB = DragonTigerBoard
+        self.IR._down_until = 0.0
+        self.IR._recommend_df = None
+        self.IR._recommend_day = None
+        self.IR._hold_cache = {}
+        self.DTB._lhb_down_until = 0.0
+        self.DTB._lhb_cache = {}
+        self.DTB._lhb_cache_date = None
+
+    def test_recent_periods_exclude_2005(self):
+        periods = self.IR._recent_periods(3)
+        self.assertEqual(len(periods), 3)
+        self.assertTrue(periods[0].startswith(str(datetime.now().year)))
+        self.assertNotIn("20051", periods)
+
+    def test_institution_source_down_stops_retrying(self):
+        import akshare as ak
+        calls = []
+
+        def _boom(*a, **kw):
+            calls.append(1)
+            raise OSError("RemoteDisconnected")
+
+        with patch.object(ak, "stock_institute_recommend", side_effect=_boom), \
+             patch.object(ak, "stock_institute_hold", side_effect=_boom):
+            f = self.IR()
+            f.analyze("002001")
+            first_round = len(calls)
+            f.analyze("002002")
+        self.assertGreater(first_round, 0)
+        self.assertEqual(len(calls), first_round)  # 冷却期内不再发起请求
+
+    def test_lhb_source_down_stops_retrying(self):
+        import akshare as ak
+        calls = []
+
+        def _boom(*a, **kw):
+            calls.append(1)
+            raise OSError("RemoteDisconnected")
+
+        with patch.object(ak, "stock_lhb_detail_em", side_effect=_boom), \
+             patch.object(ak, "stock_lhb_detail_daily_sina", side_effect=_boom):
+            f = self.DTB()
+            f.analyze("002001")
+            first_round = len(calls)
+            f.analyze("002002")
+        self.assertGreater(first_round, 0)
+        self.assertEqual(len(calls), first_round)
+
+
+class TestSkippedTaskReturnsFalse(unittest.TestCase):
+    """2026-09-14: 09:25 intraday / 09:27 afternoon 因盘前缓存未生成而空跑,
+    但心跳仍写 ok, 监控全绿而当天实际零产出。空跑必须返回 False。"""
+
+    def test_intraday_returns_false_without_premarket_cache(self):
+        from src.pipeline.intraday import run_intraday
+        with patch("src.pipeline.intraday._log_source_health"), \
+             patch("src.pipeline.intraday.load_cache", return_value=None):
+            self.assertIs(run_intraday({}), False)
+
+    def test_afternoon_returns_false_without_premarket_cache(self):
+        from src.pipeline.afternoon import run_afternoon
+        with patch("src.pipeline.afternoon._log_source_health"), \
+             patch("src.pipeline.afternoon.check_task_alerts", return_value=[]), \
+             patch("src.pipeline.afternoon.load_cache", return_value=None):
+            self.assertIs(run_afternoon({}), False)
+
+
+class TestWeightAdjustIdempotent(unittest.TestCase):
+    """2026-09-14: 同日两次盘前运行(full 补跑)把唯一有效因子 ashare_specific
+    连降两档 1.0→0.95→0.90。调权必须当天幂等。"""
+
+    class _DB:
+        def __init__(self):
+            self.called = []
+
+        def has_weight_update(self, trade_date):
+            self.called.append(("check_idem", trade_date))
+            return True
+
+        def get_attribution_history(self, days=60):
+            self.called.append(("attr", days))
+            return [{"trade_date": "2026-09-14", "factor_results": {}}]
+
+    def test_skips_when_already_adjusted_today(self):
+        from src.engine.feedback_loop import FeedbackLoop
+        fb = FeedbackLoop.__new__(FeedbackLoop)
+        fb.db = self._DB()
+        fb.config = {"weights": {"ashare_specific": 1.0}}
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.assertEqual(fb._adjust_weights(today), [])
+        self.assertEqual(fb.db.called, [("check_idem", today)])  # 未再读归因、未落库
+
+    def test_backtest_historical_date_bypasses_idempotency(self):
+        """回测传历史日期时必须照常调权(否则回测与实盘链路漂移)。"""
+        from src.engine.feedback_loop import FeedbackLoop
+        fb = FeedbackLoop.__new__(FeedbackLoop)
+        fb.db = self._DB()
+        fb.config = {"weights": {}}
+        fb._adjust_weights("2020-01-02")  # 不应因"今日已调权"提前返回
+        self.assertEqual(fb.db.called[0][0], "attr")
+
+
+class TestMLQualityGate(unittest.TestCase):
+    """2026-09-14: 样本外劣于随机的模型(train_acc=0.81 / test_acc=0.413)此前每轮
+    无条件覆盖线上模型, 而它按 5% 权重参与午后打分。门禁以测试集 AUC 判定。"""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.gettempdir(), "test_ml_gate.pkl")
+        self.hist = os.path.join(tempfile.gettempdir(), "history")
+        self._cleanup()
+
+    def tearDown(self):
+        self._cleanup()
+
+    def _cleanup(self):
+        for suffix in ("", ".meta.json", "_aux.pkl"):
+            p = self.path + suffix
+            if os.path.exists(p):
+                os.remove(p)
+        if os.path.isdir(self.hist):
+            import shutil
+            shutil.rmtree(self.hist, ignore_errors=True)
+
+    def _selector(self):
+        from src.engine.ml_selector import MLStockSelector
+        sel = MLStockSelector(model_path=self.path)
+        sel.model = "dummy"
+        return sel
+
+    def test_rejected_model_does_not_overwrite_production(self):
+        self._selector()._save_model_versioned({"accuracy": 0.413, "test_auc": 0.48})
+        self.assertFalse(os.path.exists(self.path + ".meta.json"))  # 线上 meta 未被覆盖
+        rejected = [f for f in os.listdir(self.hist) if f.startswith("rejected_")]
+        self.assertEqual(len(rejected), 1)  # 仅留诊断记录
+
+    def test_qualified_model_is_saved(self):
+        self._selector()._save_model_versioned({"accuracy": 0.58, "test_auc": 0.56})
+        with open(self.path + ".meta.json", encoding="utf-8") as f:
+            meta = json.load(f)
+        self.assertEqual(meta["metrics"]["test_auc"], 0.56)
+        self.assertFalse(meta["metrics"].get("rejected", False))
+
+    def test_low_auc_model_is_not_loaded(self):
+        """门禁闭环: 门禁上线前落盘的劣质模型必须在加载期就被挡掉。"""
+        import joblib
+        from src.engine.ml_selector import MLStockSelector
+        joblib.dump("dummy_model", self.path)
+        with open(self.path + ".meta.json", "w", encoding="utf-8") as f:
+            json.dump({"feature_names": [], "metrics": {"test_auc": 0.41}}, f)
+        sel = MLStockSelector(model_path=self.path)
+        self.assertIsNone(sel.model)
+        self.assertEqual(sel.predict({})["ml_score"], 50)  # 回退中性, 不参与打分
+
+    def test_qualified_model_is_loaded(self):
+        import joblib
+        from src.engine.ml_selector import MLStockSelector
+        joblib.dump("dummy_model", self.path)
+        with open(self.path + ".meta.json", "w", encoding="utf-8") as f:
+            json.dump({"feature_names": [], "metrics": {"test_auc": 0.56}}, f)
+        self.assertIsNotNone(MLStockSelector(model_path=self.path).model)
+
+    def test_model_without_auc_metric_still_loads(self):
+        """旧格式 meta 无 test_auc 时必须向后兼容(照常加载)。"""
+        import joblib
+        from src.engine.ml_selector import MLStockSelector
+        joblib.dump("dummy_model", self.path)
+        with open(self.path + ".meta.json", "w", encoding="utf-8") as f:
+            json.dump({"feature_names": [], "metrics": {"accuracy": 0.6}}, f)
+        self.assertIsNotNone(MLStockSelector(model_path=self.path).model)
+
+
+class TestRecommendationBackfillFromKline(unittest.TestCase):
+    """2026-09-16 修复: 历史收益 T+1/T+3/T+5 全空。
+
+    原 premarket_finalize 用"自然日窗口 + 内嵌行情获取"补收益, 周末/节假日错位,
+    kline 不全时静默跳过, 导致 2026-09-07 之后所有推荐收益为 NULL,
+    报告页历史均值显示 "-"。本测试验证新离线回填(本地 kline_daily, 交易日索引)正确幂等。
+    """
+
+    def _temp_db(self):
+        import tempfile
+        from src.data.database import StockDatabase
+        fd, path = tempfile.mkstemp(suffix=".db")
+        import os
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return StockDatabase(db_path=path)
+
+    def _tmp_db(self):
+        return self._temp_db()
+
+    def _seed_klines(self, db, code):
+        """向 kline_daily 连续写入 15 个交易日(截至今天的近 3 周)。
+
+        日期相对今天生成: 15 个工作日 ≈ 21 自然日, 稳落在回填窗口
+        days=30 内 —— 硬编码日期会随真实时间滑出窗口导致误报失败。
+        """
+        import pandas as pd
+        from datetime import datetime
+        dates = pd.bdate_range(end=datetime.now().date(), periods=15) \
+            .strftime("%Y-%m-%d").tolist()
+        closes = [10 + 0.04 * i for i in range(15)]   # 线性上涨 10.00→10.56
+        df = pd.DataFrame({"trade_date": dates, "close": closes,
+                           "open": closes, "high": closes, "low": closes,
+                           "volume": 1e6, "amount": 1e7})
+        db.save_klines(code, df)
+        return dates, closes
+
+    def _get_row(self, db, trade_date, code):
+        return db._fetch_one(
+            "SELECT * FROM recommendations WHERE trade_date=? AND code=?",
+            (trade_date, code))
+
+    def test_backfill_calculates_d1_d3_d5(self):
+        db = self._tmp_db()
+        dates, closes = self._seed_klines(db, "600001")
+        db.save_recommendation(
+            trade_date=dates[0], code="600001", name="测试股", score=60,
+            price=10.0, mode="afternoon")
+
+        updated = db.backfill_returns_from_kline(days=30)
+        self.assertEqual(updated, 5)  # d1/d3/d5/d10/d14 五个字段
+        row = self._get_row(db, dates[0], "600001")
+        self.assertIsNotNone(row["d1_return"])
+        self.assertAlmostEqual(row["d1_return"], (closes[1] / 10.0 - 1) * 100, places=2)
+        self.assertAlmostEqual(row["d3_return"], (closes[3] / 10.0 - 1) * 100, places=2)
+        self.assertAlmostEqual(row["d5_return"], (closes[5] / 10.0 - 1) * 100, places=2)
+
+    def test_backfill_is_idempotent_and_respects_overwrite(self):
+        db = self._tmp_db()
+        dates, closes = self._seed_klines(db, "600001")
+        db.save_recommendation(
+            trade_date=dates[0], code="600001", name="测试股", score=60,
+            price=10.0, mode="afternoon")
+        db.backfill_returns_from_kline(days=30)
+        # 修改已填值, 不 overwrite 时回填不得覆盖
+        db.update_performance(dates[0], "600001", d1=99.0, mode="afternoon")
+        db.backfill_returns_from_kline(days=30)
+        self.assertEqual(self._get_row(db, dates[0], "600001")["d1_return"], 99.0)
+        # overwrite=True 时重算
+        db.backfill_returns_from_kline(days=30, overwrite=True)
+        self.assertAlmostEqual(
+            self._get_row(db, dates[0], "600001")["d1_return"],
+            (closes[1] / 10.0 - 1) * 100, places=2)
+
+    def test_backfill_skips_non_trading_recommendation_date(self):
+        """推荐日在行情无记录时(新股/缺失)不得抛错, 也无需回填"""
+        db = self._tmp_db()
+        dates, _ = self._seed_klines(db, "600001")
+        import pandas as pd
+        pre = (pd.Timestamp(dates[0]) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        db.save_recommendation(
+            trade_date=pre, code="600001", name="测试股", score=60,
+            price=10.0, mode="afternoon")  # 早于 K 线起点(相对日期防滑窗)
+        updated = db.backfill_returns_from_kline(days=30)
+        self.assertEqual(updated, 0)
+        # 窗口拉大重验: 基准日不在 K 线里, 仍不得误填
+        db.backfill_returns_from_kline(days=60)
+        row = self._get_row(db, pre, "600001")
+        self.assertIsNone(row["d1_return"])  # K线起点晚于推荐日, 基准日找不到→跳过
+
+    def test_enrich_history_returns_fills_report_field(self):
+        """reporter._enrich_history_returns 按 (date, code) 回填历史摘要字段"""
+        db = self._tmp_db()
+        dates, closes = self._seed_klines(db, "600001")
+        db.save_recommendation(
+            trade_date=dates[0], code="600001", name="测试股", score=60,
+            price=10.0, mode="afternoon")
+        db.backfill_returns_from_kline(days=30)
+
+        with patch("src.data.database.StockDatabase", return_value=db):
+            from src.engine.reporter import ReportGenerator
+            report = ReportGenerator()
+            history = [{"date": dates[0], "stocks": [{"code": "600001", "price": 10.0}]}]
+            report._enrich_history_returns(history)
+        s = history[0]["stocks"][0]
+        self.assertIsNotNone(s.get("d1_return"))
+        self.assertIsNotNone(s.get("return_to_date"))  # ROI 最新收盘 / entry - 1
+        self.assertAlmostEqual(s["return_to_date"], (closes[-1] / 10.0 - 1) * 100, places=2)
+
+
+class TestBackfillModeIsolation(unittest.TestCase):
+    """backfill_recommendation_returns 的 mode 隔离（2026-10-15 修复）
+
+    同一 (trade_date, code) 可同时存在 premarket 与 afternoon 两条推荐，
+    已确认实例： 2026-09-18 000338、2026-09-21 000628。
+    旧实现把 mode 归一成 premarket='1' 与 afternoon='2' 两个字符串，
+    而默认回填只按 trade_date 定位，导致站点的实盘推荐长期漏回填。
+    回归测试锁定三条约定：
+      1. 单模式回填不得波及其它模式
+      2. mode=live 一次覆盖两个实盘模式，且各按本行入场价计价
+      3. premarket/afternoon 绝不触碰 backtest/feedback_training 的模拟收益
+    """
+    import sqlite3  # 局部导入：避免改动文件头既有 import 区
+
+    def setUp(self):
+        # 被测模块在 scripts/ 下（非包），需显式加入 sys.path
+        scripts_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "scripts"))
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+
+    # ---- 辅助 ----
+    def _new_db(self, path):
+        conn = self.sqlite3.connect(path)
+        conn.execute("""
+            CREATE TABLE recommendations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT, code TEXT, name TEXT, score REAL,
+                current_price REAL, rank INTEGER, mode TEXT,
+                d1_return REAL, d3_return REAL, d5_return REAL,
+                d10_return REAL, d14_return REAL,
+                factors TEXT, created_at TEXT, regime TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    def _seed(self, path, rows):
+        """rows: [(trade_date, code, current_price, mode), ...]"""
+        conn = self.sqlite3.connect(path)
+        conn.executemany(
+            "INSERT INTO recommendations (trade_date, code, current_price, mode) "
+            "VALUES (?,?,?,?)", rows)
+        conn.commit()
+        conn.close()
+
+    def _get(self, path, mode):
+        conn = self.sqlite3.connect(path)
+        conn.row_factory = self.sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM recommendations WHERE mode=?", (mode,)).fetchone()
+        conn.close()
+        return row
+
+    def _get_field(self, path, mode, field):
+        conn = self.sqlite3.connect(path)
+        row = conn.execute(
+            f"SELECT {field} FROM recommendations WHERE mode=?", (mode,)).fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    @staticmethod
+    def _fake_daily():
+        """离线模拟 baostock 日K {date: close}，覆盖 2026-09-10 ~ 2026-10-20"""
+        dates = ([f"2026-09-{d:02d}" for d in range(10, 31)]
+                 + [f"2026-10-{d:02d}" for d in range(1, 21)])
+        return {d: 10.0 + i * 0.1 for i, d in enumerate(dates)}
+
+    def _run_backfill(self, db_path, mode):
+        """在离线环境下执行一次 backfill: baostock 换成假模块, fetch_daily 换成假行情"""
+        import backfill_recommendation_returns as mod
+        from unittest.mock import MagicMock  # 局部导入，避免改动文件头 import 区
+        with patch.dict(sys.modules, {"baostock": MagicMock()}), \
+                patch.object(mod, "DB_PATH", db_path), \
+                patch.object(mod, "fetch_daily", return_value=self._fake_daily()):
+            mod.backfill(mode)
+
+    # ---- 用例 ----
+    def test_premarket_backfill_does_not_touch_afternoon(self):
+        """默认 premarket 回填不得改写 afternoon 行"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "t.db")
+            self._new_db(db)
+            self._seed(db, [("2026-09-18", "000338", 100.0, "premarket"),
+                            ("2026-09-18", "000338", 100.0, "afternoon")])
+            self._run_backfill(db, "premarket")
+
+            # premarket 行已回填
+            self.assertIsNotNone(self._get_field(db, "premarket", "d5_return"))
+            # afternoon 行必须保持全空
+            for f in ("d1_return", "d3_return", "d5_return", "d10_return", "d14_return"):
+                self.assertIsNone(self._get_field(db, "afternoon", f))
+
+    def test_live_fills_both_modes_with_own_entry(self):
+        """live 一次覆盖两个实盘模式，且各按本行入场价计价"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "t.db")
+            self._new_db(db)
+            self._seed(db, [("2026-09-18", "000338", 100.0, "premarket"),
+                            ("2026-09-18", "000338", 200.0, "afternoon")])
+            self._run_backfill(db, "live")
+
+            pm = self._get_field(db, "premarket", "d5_return")
+            af = self._get_field(db, "afternoon", "d5_return")
+            self.assertIsNotNone(pm)
+            self.assertIsNotNone(af)
+            # 入场价不同 => 收益率必须不同；相同即说明看错行的入场价
+            self.assertNotEqual(pm, af)
+            # 2026-09-18 是 _fake_daily 的第 9 项(idx=8)，T+5 落在 idx=13 = 2026-09-23，
+            # close = 10.0 + 13 * 0.1 = 11.3
+            self.assertEqual(pm, round((11.3 / 100.0 - 1) * 100, 2))
+            self.assertEqual(af, round((11.3 / 200.0 - 1) * 100, 2))
+
+    def test_live_never_touches_simulation_modes(self):
+        """实盘模式回填绝不得触碰模拟模式"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "t.db")
+            self._new_db(db)
+            self._seed(db, [("2026-09-18", "000338", 100.0, "premarket"),
+                            ("2026-09-18", "000338", 200.0, "afternoon"),
+                            ("2026-09-18", "000338", 100.0, "feedback_training"),
+                            ("2026-09-18", "000338", 100.0, "backtest")])
+            self._run_backfill(db, "live")
+
+            for mode in ("feedback_training", "backtest"):
+                for f in ("d1_return", "d5_return", "d14_return"):
+                    self.assertIsNone(self._get_field(db, mode, f))
+
+    def test_live_fills_only_first_pending_method(self):
+        """live 只回填第一个待补模式，避免重复计算同一收益源"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "t.db")
+            self._new_db(db)
+            self._seed(db, [("2026-09-18", "000001", 100.0, "premarket"),
+                            ("2026-09-18", "000002", 200.0, "afternoon")])
+            self._run_backfill(db, "live")
+
+            for code in ("000001", "000002"):
+                self.assertIsNotNone(
+                    self._get_field_by_code(db, code, "d5_return"))
+
+    def _get_field_by_code(self, path, code, field):
+        conn = self.sqlite3.connect(path)
+        row = conn.execute(
+            f"SELECT {field} FROM recommendations WHERE code=?", (code,)).fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def test_all_overwrites_simulation_row(self):
+        """all 应一并覆盖模拟模式行"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "t.db")
+            self._new_db(db)
+            self._seed(db, [("2026-09-18", "000338", 100.0, "feedback_training")])
+            self._run_backfill(db, "all")
+            self.assertIsNotNone(
+                self._get_field(db, "feedback_training", "d5_return"))
+
+    def test_idempotent_no_growth_on_second_run(self):
+        """重复运行已回填行，值不变且有输出提示（幂等）"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "t.db")
+            self._new_db(db)
+            self._seed(db, [("2026-09-18", "000001", 100.0, "premarket"),
+                            ("2026-09-18", "000002", 100.0, "afternoon")])
+            self._run_backfill(db, "live")
+            v1 = {c: self._get_field_by_code(db, c, "d5_return")
+                  for c in ("000001", "000002")}
+            self._run_backfill(db, "live")
+            v2 = {c: self._get_field_by_code(db, c, "d5_return")
+                  for c in ("000001", "000002")}
+            self.assertEqual(v1, v2)
+            for c, v in v2.items():
+                self.assertIsNotNone(v, f"{c} 第二次应为已完成而非被清空")
