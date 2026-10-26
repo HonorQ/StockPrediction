@@ -32,20 +32,32 @@ class MLStockSelector:
         self._try_load_model()
 
     def _try_load_model(self):
-        """启动时尝试加载已存在的模型（主模型 + 辅助模型）"""
+        """启动时尝试加载已存在的模型（主模型 + 辅助模型）。
+
+        加载前先查 meta 的质量门禁: 劣于随机的历史模型(门禁上线前训练并落盘的)
+        直接按"无模型"处理, 否则它会持续以 5% 权重给推荐引入噪声。
+        predict 在 model=None 时返回中性 50, 调用方(午后模式)会自动跳过 ML 微调。
+        """
         if os.path.exists(self.model_path):
             try:
-                self.model = joblib.load(self.model_path)
-                if os.path.exists(self.model_aux_path):
-                    self.model_aux = joblib.load(self.model_aux_path)
+                meta = {}
                 if os.path.exists(self.model_meta_path):
                     with open(self.model_meta_path, "r", encoding="utf-8") as f:
                         meta = json.load(f)
-                    self.feature_names = meta.get("feature_names", [])
-                    self.model_type = meta.get("model_type", "ensemble")
-                    ki = meta.get("keep_index")
-                    if ki:
-                        self._keep_index = [int(i) for i in ki]
+                    auc = (meta.get("metrics") or {}).get("test_auc")
+                    if auc is not None and float(auc) < self.MIN_TEST_AUC:
+                        logger.warning(
+                            "线上 ML 模型未达质量门禁(test_auc=%s < %.2f), 按无模型处理"
+                            "(ML 分数取中性50, 不参与打分)", auc, self.MIN_TEST_AUC)
+                        return
+                self.model = joblib.load(self.model_path)
+                if os.path.exists(self.model_aux_path):
+                    self.model_aux = joblib.load(self.model_aux_path)
+                self.feature_names = meta.get("feature_names", [])
+                self.model_type = meta.get("model_type", "ensemble")
+                ki = meta.get("keep_index")
+                if ki:
+                    self._keep_index = [int(i) for i in ki]
                 # 特征数量不匹配时清空模型强制下次重训练
                 expected_len = len(self.feature_names) if self.feature_names else 0
                 if expected_len > 0 and hasattr(self.model, "n_features_in_"):
@@ -414,10 +426,22 @@ class MLStockSelector:
             self.feature_importance.items(), key=lambda x: x[1], reverse=True
         )
 
+        # 测试集 AUC: accuracy 在类别不平衡下不可比(选模阶段即用 AUC)，
+        # 上线门禁与劣化诊断都以 AUC 为准；无法计算时置 None
+        test_auc = None
+        try:
+            from sklearn.metrics import roc_auc_score
+            if len(set(y_test)) > 1 and hasattr(self.model, "predict_proba"):
+                test_auc = round(float(roc_auc_score(
+                    y_test, self.model.predict_proba(X_test)[:, 1])), 4)
+        except Exception as e:
+            logger.warning("测试集 AUC 计算失败(忽略): %s", e)
+
         # --- 保存（版本化：保留最近 N 版，模型劣化时可回滚对比）---
         metrics = {
             "accuracy": round(accuracy, 3),
             "train_accuracy": round(train_accuracy, 3),
+            "test_auc": test_auc,
             "precision": round(precision, 3),
             "recall": round(recall, 3),
             "f1_score": round(f1, 3),
@@ -433,12 +457,28 @@ class MLStockSelector:
         return metrics
 
     MODEL_HISTORY_KEEP = 5
+    # 上线门禁: 测试集 AUC 不得低于随机基线。劣于随机的模型在午后模式按 5% 权重
+    # 参与打分, 只会给推荐引入噪声(2026-09-14 实测 train_acc=0.81 / test_acc=0.413)。
+    MIN_TEST_AUC = 0.5
 
     def _save_model_versioned(self, metrics: Dict):
         """保存当前模型并归档历史版本(models/history/)，
-        meta.json 记录训练指标供劣化诊断与回滚对比。"""
+        meta.json 记录训练指标供劣化诊断与回滚对比。
+
+        质量门禁不通过时不覆盖线上模型: 只把本次指标存到 history/rejected_*.json
+        供诊断, 线上继续用旧模型(无旧模型时 ML 分数按中性 50 处理)。
+        """
         import glob
         import shutil
+        auc = metrics.get("test_auc")
+        if auc is not None and auc < self.MIN_TEST_AUC:
+            metrics["rejected"] = True
+            metrics["reject_reason"] = f"test_auc={auc} < {self.MIN_TEST_AUC}"
+            logger.warning(
+                "ML 模型未通过质量门禁(test_auc=%s < %.2f), 保留线上模型不覆盖: %s",
+                auc, self.MIN_TEST_AUC, self.model_path)
+            self._record_rejection(metrics)
+            return
         # 归档上一版
         if os.path.exists(self.model_path):
             hist_dir = os.path.join(os.path.dirname(self.model_path), "history")
@@ -474,7 +514,21 @@ class MLStockSelector:
                 "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "keep_index": self._keep_index,
                 "metrics": metrics,
-            }, f, ensure_ascii=False, indent=2)
+                # metrics 含 numpy int32/float32, 无 default 会抛
+                # "Object of type int32 is not JSON serializable" 导致整轮重训练结果丢失
+            }, f, ensure_ascii=False, indent=2, default=str)
+
+    def _record_rejection(self, metrics: Dict):
+        """记录被门禁拒绝的训练指标(models/history/rejected_*.json), 供劣化诊断。"""
+        try:
+            hist_dir = os.path.join(os.path.dirname(self.model_path), "history")
+            os.makedirs(hist_dir, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(hist_dir, f"rejected_{stamp}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(metrics, f, ensure_ascii=False, indent=2, default=str)
+        except OSError as e:
+            logger.warning("门禁拒绝记录写入失败(忽略): %s", e)
 
 
 

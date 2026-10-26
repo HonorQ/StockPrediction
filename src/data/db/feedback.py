@@ -248,6 +248,13 @@ class FeedbackMixin:
             (trade_date, factor_name, old_weight, new_weight, reason)
         )
 
+    def has_weight_update(self, trade_date: str) -> bool:
+        """当天是否已有调权记录。供调权幂等使用(补跑/重跑不得重复惩罚同一因子)。"""
+        with self._connection() as conn:
+            cur = conn.execute(
+                "SELECT 1 FROM weight_history WHERE trade_date = ? LIMIT 1", (trade_date,))
+            return cur.fetchone() is not None
+
 
     def get_weight_history(self, days: int = 90) -> List[Dict]:
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")

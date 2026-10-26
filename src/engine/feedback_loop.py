@@ -130,12 +130,19 @@ class FeedbackLoop:
             try:
                 retrained = self._maybe_retrain_model(today)
                 if retrained:
-                    result["model_retrained"] = True
+                    result["model_retrained"] = not retrained.get("rejected")
                     result["model_metrics"] = retrained
-                    result["messages"].append(
-                        f"模型重训练: {retrained.get('model_type')} "
-                        f"acc={retrained.get('accuracy')}"
-                    )
+                    if retrained.get("rejected"):
+                        result["messages"].append(
+                            f"模型重训练未上线({retrained.get('reject_reason')}), "
+                            f"保留线上模型"
+                        )
+                    else:
+                        result["messages"].append(
+                            f"模型重训练: {retrained.get('model_type')} "
+                            f"acc={retrained.get('accuracy')} "
+                            f"auc={retrained.get('test_auc')}"
+                        )
             except Exception as e:
                 logger.warning("捕获异常已忽略(src/engine/feedback_loop.py:135): %s", e)
                 result["messages"].append(f"ML重训练失败: {e}")
@@ -379,6 +386,16 @@ class FeedbackLoop:
         """
         if today is None:
             today = datetime.now().strftime("%Y-%m-%d")
+        # 幂等: 同一天只调权一次。盘前补跑/重跑会重复惩罚同一因子
+        # (2026-09-14 实测: 09:27 与 11:35 两次运行把 ashare_specific 连降两档 1.0→0.95→0.90)。
+        # 仅真实当前日期生效, 回测(传入历史 today)不受影响。
+        if today == datetime.now().strftime("%Y-%m-%d"):
+            try:
+                if self.db.has_weight_update(today):
+                    logger.info("今日(%s)已完成调权, 跳过本轮重复调权", today)
+                    return []
+            except Exception as e:
+                logger.warning("调权幂等检查失败, 继续执行: %s", e)
         all_attr = self.db.get_attribution_history(days=60)
         if not all_attr:
             return []
