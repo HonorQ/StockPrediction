@@ -6,7 +6,7 @@
 """
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if ROOT not in sys.path:
@@ -22,8 +22,7 @@ from src.data.database import StockDatabase
 from src.engine.scorer import StockScorer
 from src.engine.entry_risk_filter import (
     _filter_high_risk_entries)
-from src.engine.paper_trade_ops import (
-    _update_open_paper_trades, _fetch_close_price_on_date)
+from src.engine.paper_trade_ops import _update_open_paper_trades
 from src.pipeline.common import _pack
 from src.pipeline.common import save_cache
 from src.pipeline.common import write_summary
@@ -530,28 +529,8 @@ def _pm_save_and_open(ctx):
             factors=s.get("factors", {}),
         )
     try:
-        for lookback, db_field, param_field in [(1, "d1_return", "d1"), (3, "d3_return", "d3"),
-                                                (5, "d5_return", "d5"), (10, "d10_return", "d10"),
-                                                (14, "d14_return", "d14")]:
-            check_date = (datetime.now() - timedelta(days=lookback)).strftime("%Y-%m-%d")
-            past_recs = db.get_recent_recommendations(days=lookback + 2)
-            for past in past_recs:
-                if past.get(db_field) is not None:
-                    continue  # already updated
-                if past["trade_date"] != check_date:
-                    continue
-                entry = past.get("current_price", 0)
-                if entry <= 0:
-                    continue
-                # 用T+N日的实际收盘价（而不是当日实时价）计算收益
-                exit_price = _fetch_close_price_on_date(market_fetcher, past["code"], check_date, lookback)
-                if exit_price and exit_price > 0:
-                    ret = (exit_price / entry - 1) * 100
-                    db.update_performance(
-                        check_date, past["code"],
-                        **{param_field: round(ret, 2)},
-                        mode=past.get("mode") or "premarket",
-                    )
+        # 离线回填 T+N 收益(读取本地缓存 K 线, 不依赖网络/自然日窗口)
+        db.backfill_returns_from_kline(days=120)
     except Exception as e:
         logger.warning("更新历史表现失败: %s", e)
     _pack(ctx, dict(locals()))

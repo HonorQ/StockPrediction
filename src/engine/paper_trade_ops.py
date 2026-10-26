@@ -59,11 +59,18 @@ def _fetch_today_close(market_fetcher, code):
         return None
 
 
+def _is_before_market_close() -> bool:
+    """当前是否早于A股收盘(15:00)。收盘前不存在当日收盘价。"""
+    now = datetime.now()
+    return (now.hour, now.minute) < (15, 0)
+
+
 def _try_close_expired(db, market_fetcher, t, hold_days, today):
     """持仓到期平仓检查。返回 'closed'(已平) / 'defer'(顺延) / 'not_due'(未到期)。
 
     到期但不取得到价时顺延(下日再试), 不用入场价强行平仓——
     那会把"未知收益"记成 0.0, 污染纸面交易统计。
+    盘中(收盘前)本来就取不到当日收盘价, 属正常等待, 按未到期处理且不刷屏。
     """
     entry_date = t.get("entry_date") or t["trade_date"]
     d0 = datetime.strptime(entry_date, "%Y-%m-%d")
@@ -73,6 +80,9 @@ def _try_close_expired(db, market_fetcher, t, hold_days, today):
 
     close_price = _fetch_today_close(market_fetcher, t["code"])
     if not close_price or close_price <= 0:
+        if _is_before_market_close():
+            logger.debug("%s: 到期但当日未收盘, 平仓推迟到收盘后", t.get("name", t["code"]))
+            return "not_due"
         print(f"    ⏳ {t.get('name', t['code'])}: 到期但取不到当日价格，顺延平仓")
         return "defer"
 

@@ -516,3 +516,64 @@ class RecommendationsMixin:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def backfill_returns_from_kline(self, days: int = 90, overwrite: bool = False) -> int:
+        """用本地 kline_daily 补齐推荐的 T+N 收益(离线, 不依赖 baostock/网络)。
+
+        背景: premarket_finalize 的自然日窗口回填对实盘推荐经常补不上(周末/停更错位),
+        原 scripts/backfill_recommendation_returns.py 需联网逐股拉K线, 慢且受数据源限制。
+        本方法直接读已落库的 kline_daily 表, 口径与旧脚本一致:
+            收益(%)= (T+N 收盘 / current_price - 1) * 100
+        幂等: 已回填字段默认不重算(overwrite=True 强制)。
+        返回本次写入的字段个数。
+        """
+        import bisect
+
+        with self._connection() as conn:
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            rows = conn.execute(
+                """SELECT trade_date, code, current_price, mode FROM recommendations
+                   WHERE trade_date >= ? ORDER BY trade_date ASC""", (cutoff,)
+            ).fetchall()
+
+            # 每只股票只取样一次 K 线(日期序列升序)
+            kline_days: Dict[str, List] = {}
+            for code in {r[1] for r in rows}:
+                kline_days[code] = [
+                    (x[0], float(x[1])) for x in conn.execute(
+                        "SELECT trade_date, close FROM kline_daily WHERE code=? AND close>0 ORDER BY trade_date",
+                        (code,))]
+
+            updated = 0
+            for trade_date, code, price, mode in rows:
+                if not price or price <= 0:
+                    continue
+                days_list = kline_days.get(code)
+                if not days_list:
+                    continue
+                # 基准日 = 推荐日本身; 缓存中不存在推荐日(行情缺失/缓存不足)则跳过该股
+                base_idx = bisect.bisect_left(days_list, (trade_date,))
+                if base_idx >= len(days_list) or days_list[base_idx][0] != trade_date:
+                    continue
+                for n_days, field in ((3, "d3_return"), (1, "d1_return"), (5, "d5_return"),
+                                     (10, "d10_return"), (14, "d14_return")):
+                    exit_idx = base_idx + n_days
+                    if exit_idx >= len(days_list):
+                        continue
+                    exit_price = kline_days[code][exit_idx][1]
+                    if not exit_price or exit_price <= 0:
+                        continue
+                    if not overwrite:
+                        cur = conn.execute(
+                            f"SELECT {field} FROM recommendations WHERE trade_date=? AND code=?"
+                            " AND (mode=? OR (mode IS NULL AND ? IS NULL))",
+                            (trade_date, code, mode, mode))
+                        if cur.fetchone()[0] is not None:
+                            continue
+                    ret = round((exit_price / price - 1) * 100, 2)
+                    conn.execute(
+                        f"UPDATE recommendations SET {field}=? WHERE trade_date=? AND code=?"
+                        " AND (mode=? OR (mode IS NULL AND ? IS NULL))",
+                        (ret, trade_date, code, mode, mode))
+                    updated += 1
+            return updated
+

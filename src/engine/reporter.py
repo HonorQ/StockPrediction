@@ -741,10 +741,13 @@ class ReportGenerator:
         if len(history) > max_history:
             history = history[:max_history]
 
-        # 5. 保存历史数据
+        # 5. 从本地数据库回填历史收益(离线 kline_daily, 修复 2026-09 历史收益全空问题)
+        self._enrich_history_returns(history)
+
+        # 6. 保存历史数据
         self._save_history(history_path, history)
 
-        # 6. 生成单文件HTML
+        # 7. 生成单文件HTML
         index_html = self._build_single_file_html(history)
 
         with open(index_path, "w", encoding="utf-8") as f:
@@ -752,6 +755,77 @@ class ReportGenerator:
 
         logger.info(f'  ✅ 报告已保存: {index_path}')
         return index_path
+
+    def refresh_history(self) -> str:
+        """从本地数据库重拉收益, 重建历史与 index.html(不新增当日条目)。
+
+        供收益回填后刷新页面使用: 数据库回填完成 → 重新打开报告页即见历史平均。
+        """
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        index_path = os.path.join(project_root, "reports", "daily", "index.html")
+        history_path = os.path.join(project_root, "reports", "daily", "history.json")
+
+        history = self._load_history(history_path)
+        self._enrich_history_returns(history)
+        self._save_history(history_path, history)
+        index_html = self._build_single_file_html(history)
+        with open(index_path, "w", encoding="utf-8") as f:
+            f.write(index_html)
+        logger.info(f'  ✅ 已重建报告(不新增条目): {index_path}')
+        return index_path
+
+    def _enrich_history_returns(self, history: List[Dict]) -> None:
+        """按 (trade_date, code) 把本地数据库的 T+N 收益回填进历史条目。
+
+        - 仅当历史中该字段为 None 时写入(不覆盖旧值, 幂等)。
+        - return_to_date 用 kline_daily 最新收盘价 / 入场价 - 1 计算。
+        - 收益口径: records 表存的是百分数(如 16.72 = 16.72%)。
+        - 数据库不可用时静默返回(不影响报告主流程)。
+        """
+        try:
+            from src.data.database import StockDatabase
+            db = StockDatabase()
+            recs = db.get_recent_recommendations(days=60)
+        except Exception as e:
+            logger.info(f"[reporter] 历史收益回填跳过: {e}")
+            return
+
+        by_key = {}
+        for r in recs:
+            key = (r.get("trade_date"), r.get("code"))
+            # 同日同码多 mode(午后/盘前) 时取午后(最终推荐)
+            if key not in by_key or r.get("mode") == "afternoon":
+                by_key[key] = r
+
+        # 涉及的股票统一取最近收盘价(用于 return_to_date)
+        codes = {s.get("code") for e in history for s in e.get("stocks", []) if s.get("code")}
+        latest_close = {}
+        if codes:
+            try:
+                ph = ",".join("?" * len(codes))
+                rows = db._fetch_all(
+                    f"""SELECT code, close FROM kline_daily
+                        WHERE (code, trade_date) IN (
+                            SELECT code, MAX(trade_date) FROM kline_daily
+                            WHERE code IN ({ph}) GROUP BY code)""",
+                    tuple(codes))
+                latest_close = {r["code"]: r["close"] for r in rows}
+            except Exception as e:
+                logger.info(f"[reporter] 最新收盘价查询跳过: {e}")
+
+        for entry in history:
+            for s in entry.get("stocks", []):
+                r = by_key.get((entry.get("date"), s.get("code")))
+                if not r:
+                    continue
+                for f in ("d1_return", "d3_return", "d5_return"):
+                    if s.get(f) is None and r.get(f) is not None:
+                        s[f] = r[f]
+                price = s.get("price") or r.get("current_price")
+                close = latest_close.get(s.get("code"))
+                if (s.get("return_to_date") is None and price and close
+                        and isinstance(price, (int, float)) and price > 0):
+                    s["return_to_date"] = round((close / price - 1) * 100, 2)
 
     def _load_history(self, history_path: str) -> List[Dict]:
         """加载历史数据"""
@@ -795,12 +869,6 @@ class ReportGenerator:
 
     def _build_single_file_html(self, history: List[Dict]) -> str:
         """生成单文件HTML：最新推荐完整展示 + 历史摘要表格（含收益率）"""
-        role_names = {
-            "research": "盘前研究池",
-            "warning": "盘中预警",
-            "final": "每日推荐"
-        }
-
         # 最新推荐的完整内容
         latest_content = ""
         if history:
@@ -810,11 +878,7 @@ class ReportGenerator:
         history_rows = ""
         final_entries = [entry for entry in history[1:] if entry.get("role_key") == "final"]
         for idx, entry in enumerate(final_entries):
-            role_key = entry.get("role_key", "unknown")
-            role_name = entry.get("role", role_names.get(role_key, "报告"))
             date = entry.get("date", "")
-            time = entry.get("time", "")
-            weekday = entry.get("weekday", "")
             stocks = entry.get("stocks", [])
 
             # 计算平均收益率
@@ -833,12 +897,6 @@ class ReportGenerator:
             d3_html = self._fmt_return_cell(avg_d3)
             d5_html = self._fmt_return_cell(avg_d5)
             rtd_html = self._fmt_return_cell(avg_rtd)
-
-            role_class = {
-                "research": "role-research",
-                "warning": "role-warning",
-                "final": "role-final"
-            }.get(role_key, "")
 
             # 构建展开内容（每只股票的详细信息）
             detail_rows = ""
@@ -864,19 +922,18 @@ class ReportGenerator:
                 detail_rows += f"""
                 <tr class="detail-row"><td colspan="8" style="text-align:center;color:#8a8578;">... 共 {len(stocks)} 只股票</td></tr>"""
 
+            # 类型恒为每日推荐, 不再单独展示; 日期/星期/股票数加宽禁止换行
             history_rows += f"""
         <tr class="summary-row" onclick="toggleDetail('detail-{idx}')" style="cursor:pointer">
-          <td>{date}</td>
-          <td>{weekday}</td>
-          <td><span class="role-badge {role_class}">{role_name}</span></td>
-          <td>{len(stocks)}只</td>
+          <td class="col-date">{date}</td>
+          <td class="col-count">{len(stocks)}只</td>
           <td>{d1_html}</td>
           <td>{d3_html}</td>
           <td>{d5_html}</td>
           <td>{rtd_html}</td>
         </tr>
         <tr id="detail-{idx}" class="detail-container" style="display:none">
-          <td colspan="8" style="padding:0">
+          <td colspan="6" style="padding:0">
             <table class="detail-table">
               <thead><tr><th>代码</th><th>名称</th><th>评分</th><th>入手价</th><th>T+1</th><th>T+3</th><th>T+5</th><th>至今</th></tr></thead>
               <tbody>{detail_rows}</tbody>
@@ -976,6 +1033,18 @@ class ReportGenerator:
             border-bottom: 1px solid #f3efe4;
             font-size: 14px;
         }}
+        /* 日期/股票数: 加宽并禁止换行, 保持表头与单元格单行 */
+        .history-table .col-date {{
+            width: 130px;
+            white-space: nowrap;
+        }}
+        .history-table .col-count {{
+            width: 90px;
+            white-space: nowrap;
+        }}
+        .history-table th {{
+            white-space: nowrap;
+        }}
         .history-table tr:last-child td {{
             border-bottom: none;
         }}
@@ -1048,10 +1117,8 @@ class ReportGenerator:
         <table class="history-table">
             <thead>
                 <tr>
-                    <th>日期</th>
-                    <th>星期</th>
-                    <th>类型</th>
-                    <th>股票数</th>
+                    <th class="col-date">日期</th>
+                    <th class="col-count">股票数</th>
                     <th>T+1均值</th>
                     <th>T+3均值</th>
                     <th>T+5均值</th>
@@ -1059,7 +1126,7 @@ class ReportGenerator:
                 </tr>
             </thead>
             <tbody>
-                {history_rows if history_rows else '<tr><td colspan="8"><div class="empty-state"><p>暂无历史记录</p></div></td></tr>'}
+                {history_rows if history_rows else '<tr><td colspan="6"><div class="empty-state"><p>暂无历史记录</p></div></td></tr>'}
             </tbody>
         </table>
 
