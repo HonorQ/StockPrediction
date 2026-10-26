@@ -82,48 +82,18 @@ class MoneyFlowFetcher:
 
         # 方式1: 直接调用东财push2 API
         if not self._is_em_down():
-            try:
-                import requests as _req
-                # 东财 secid 市场: 1=沪(6/9开头) 0=深(0/2/3开头)；北交所为 0.
-                # 原实现北交所(4/8开头)被归入"1.沪"导致查询必错
-                raw = code.lstrip("shzjb") or code
-                if stock_code.lower().startswith(("sh",)) or raw.startswith(("6", "9")):
-                    market = "1"
-                elif raw.startswith(("4", "8")) or stock_code.lower().startswith("bj"):
-                    market = "0"
-                else:
-                    market = "0"
-                url = "https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get"
-                params = {
-                    "lmt": 0, "klt": 101,
-                    "secid": f"{market}.{code}",
-                    "fields1": "f1,f2,f3,f7",
-                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-                    "ut": "b2884a393a59ad64002292a3e90d46a5",
+            klines = self._fetch_em_fflow_klines(code, stock_code)
+            if klines:
+                latest = klines[-1].split(",")
+                return {
+                    "date": latest[0] if len(latest) > 0 else "",
+                    "main_flow": float(latest[1]) if len(latest) > 1 else 0,
+                    "main_pct": float(latest[6]) if len(latest) > 6 else 0,
+                    "super_large": float(latest[5]) if len(latest) > 5 else 0,
+                    "large": float(latest[4]) if len(latest) > 4 else 0,
+                    "medium": float(latest[3]) if len(latest) > 3 else 0,
+                    "small": float(latest[2]) if len(latest) > 2 else 0,
                 }
-                headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com"}
-                resp = _req.get(url, params=params, headers=headers, timeout=8)
-                data = resp.json()
-                d = data.get("data") or {}
-                if d.get("klines"):
-                    klines = d["klines"]
-                    if klines:
-                        latest = klines[-1].split(",")
-                        return {
-                            "date": latest[0] if len(latest) > 0 else "",
-                            "main_flow": float(latest[1]) if len(latest) > 1 else 0,
-                            "main_pct": float(latest[6]) if len(latest) > 6 else 0,
-                            "super_large": float(latest[5]) if len(latest) > 5 else 0,
-                            "large": float(latest[4]) if len(latest) > 4 else 0,
-                            "medium": float(latest[3]) if len(latest) > 3 else 0,
-                            "small": float(latest[2]) if len(latest) > 2 else 0,
-                        }
-            except Exception as e:
-                if not self._warned:
-                    logger.info(f'      ⚠️ 资金流向API失败(push2): {e}')
-                    self._warned = True
-                self._em_down = True
-                self._em_down_at = time.time()
 
         # 方式2: 同花顺缓存（有净额但无主力/大单细分）
         self._load_ths_cache()
@@ -141,6 +111,78 @@ class MoneyFlowFetcher:
             }
 
         return {"main_flow": 0, "main_pct": 0, "super_large": 0, "large": 0, "medium": 0, "small": 0}
+
+    def _fetch_em_fflow_klines(self, code: str, stock_code: str):
+        """东财个股资金流日线原始行。返回 list[str](每行逗号分隔) 或 None(源不可用)。
+
+        东财 fflow/daykline 是唯一提供资金流历史的免费源; 源挂掉时标记 _em_down,
+        由同花顺单日净额兜底(见 get_stock_fund_flow)。
+        """
+        try:
+            import requests as _req
+            # 东财 secid 市场: 1=沪(6/9开头) 0=深(0/2/3开头)；北交所为 0.
+            # 原实现北交所(4/8开头)被归入"1.沪"导致查询必错
+            raw = code.lstrip("shzjb") or code
+            if stock_code.lower().startswith(("sh",)) or raw.startswith(("6", "9")):
+                market = "1"
+            elif raw.startswith(("4", "8")) or stock_code.lower().startswith("bj"):
+                market = "0"
+            else:
+                market = "0"
+            url = "https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get"
+            params = {
+                "lmt": 0, "klt": 101,
+                "secid": f"{market}.{code}",
+                "fields1": "f1,f2,f3,f7",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+                "ut": "b2884a393a59ad64002292a3e90d46a5",
+            }
+            headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com"}
+            resp = _req.get(url, params=params, headers=headers, timeout=8)
+            data = resp.json()
+            d = data.get("data") or {}
+            return d.get("klines") or None
+        except Exception as e:
+            if not self._warned:
+                logger.info(f'      ⚠️ 资金流向API失败(push2): {e}')
+                self._warned = True
+            self._em_down = True
+            self._em_down_at = time.time()
+            return None
+
+    def get_stock_fund_flow_history(self, stock_code: str, days: int = 10) -> pd.DataFrame:
+        """个股主力资金流日线序列(近 days 日)。
+
+        返回列: 日期/主力净流入/小单/中单/大单/超大单/主力净占比;
+        东财不可用时返回空 DataFrame(调用方应降级为中性分)。
+        单日快照请用 get_stock_fund_flow(含同花顺兜底)。
+        """
+        code = stock_code.replace("sh", "").replace("sz", "").replace("bj", "")
+        if self._is_em_down():
+            return pd.DataFrame()
+        klines = self._fetch_em_fflow_klines(code, stock_code)
+        if not klines:
+            return pd.DataFrame()
+
+        def _f(parts, idx):
+            try:
+                return float(parts[idx])
+            except (IndexError, ValueError):
+                return 0.0
+
+        records = []
+        for line in klines[-max(days, 1):]:
+            p = line.split(",")
+            records.append({
+                "日期": p[0] if p else "",
+                "主力净流入": _f(p, 1),
+                "小单": _f(p, 2),
+                "中单": _f(p, 3),
+                "大单": _f(p, 4),
+                "超大单": _f(p, 5),
+                "主力净占比": _f(p, 6),
+            })
+        return pd.DataFrame(records)
 
     # ------------------------------------------------------------------
     # 行业资金流向（板块热度参考）

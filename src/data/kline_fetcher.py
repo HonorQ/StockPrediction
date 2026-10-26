@@ -22,6 +22,12 @@ except Exception as e:
 # 腾讯K线字段映射: 腾讯代码 → 字段列表
 _TX_KLINE_FIELDS = "date,open,high,low,close,volume,amount"
 
+# 腾讯K线域名(按优先级)。web.ifzq.gtimg.cn 被腾讯 WAF 拦截时返回 501 + HTML拦截页,
+# 而非JSON, 曾导致整轮盘前K线全灭; 故必须支持域名级 failover。
+_TX_KLINE_HOSTS = ("web.ifzq.gtimg.cn", "ifzq.gtimg.cn")
+# 单域名连续失败达此次数后, 本进程内不再尝试(避免持续触发WAF并刷屏)
+_TX_HOST_MAX_FAIL = 3
+
 
 class KlineFetcher:
     """历史K线获取 + 换手率补充"""
@@ -32,6 +38,15 @@ class KlineFetcher:
         self._cache_ts_put = cache_ts_put or (lambda k, v: None)
         self._db = db
         self._turnover_warned = False
+
+    # 域名级失败计数(类变量, 进程内共享)
+    _host_fail: dict = {}
+
+    @classmethod
+    def _tencent_hosts(cls):
+        """返回当前可用的腾讯K线域名, 跳过已被WAF封禁/连续失败的域名。"""
+        return [h for h in _TX_KLINE_HOSTS
+                if cls._host_fail.get(h, 0) < _TX_HOST_MAX_FAIL] or list(_TX_KLINE_HOSTS)
 
     def _fetch_tencent_kline(
         self, host: str, tx_symbol: str, start: str, end: str,
@@ -92,7 +107,11 @@ class KlineFetcher:
             df["涨跌幅"] = df["收盘"].pct_change().fillna(0) * 100
             return df.tail(days).reset_index(drop=True)
         except Exception as e:
-            logger.warning("腾讯K线(%s)失败: %s", host, e)
+            # 同一域名只告警一次: WAF 封禁后每只票都报警会刷屏(2026-09-14: 134条同类告警)
+            if KlineFetcher._host_fail.get(host, 0) == 0:
+                logger.warning("腾讯K线(%s)失败: %s", host, e)
+            else:
+                logger.debug("腾讯K线(%s)仍失败: %s", host, e)
             return None
 
     _turnover_warned = False
@@ -171,7 +190,13 @@ class KlineFetcher:
             tx_symbol = prefix + clean
         end = datetime.now().strftime("%Y-%m-%d")
         start = (datetime.now() - timedelta(days=days * 2 + 60)).strftime("%Y-%m-%d")
-        df = self._fetch_tencent_kline("web.ifzq.gtimg.cn", tx_symbol, start, end, days, days)
+        df = None
+        for host in self._tencent_hosts():
+            df = self._fetch_tencent_kline(host, tx_symbol, start, end, days, days)
+            if df is not None and not df.empty:
+                KlineFetcher._host_fail[host] = 0
+                break
+            KlineFetcher._host_fail[host] = KlineFetcher._host_fail.get(host, 0) + 1
         if df is None or df.empty:
             df = self._fetch_sina_kline(tx_symbol, days)
         if df is None or df.empty:

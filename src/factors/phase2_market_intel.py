@@ -137,14 +137,19 @@ class MoneyFlowContinuity:
                 logger.warning("MoneyFlowContinuity 未注入 money_fetcher, 跳过资金流分析(%s)", stock_code)
                 return result
 
-            flow_data = fetcher.get_stock_fund_flow(stock_code)
-            if flow_data is None or flow_data.empty:
+            # 连续性需要日线序列: get_stock_fund_flow 只返回单日快照(dict),
+            # 用 history 源取近10日主力净流入(东财不可用时为空 → 降级中性分)
+            get_hist = getattr(fetcher, "get_stock_fund_flow_history", None)
+            if get_hist is None:
+                return result
+            flow_hist = get_hist(stock_code, days=10)
+            if flow_hist is None or flow_hist.empty:
                 return result
 
             # 检查字段
-            main_net = flow_data.get("主力净流入", None)
+            main_net = flow_hist.get("主力净流入", None)
             if main_net is None:
-                main_net = flow_data.get("主力净流入-净额", None)
+                main_net = flow_hist.get("主力净流入-净额", None)
             if main_net is None:
                 return result
 
@@ -214,6 +219,74 @@ class InstitutionalResearch:
     def __init__(self):
         pass
 
+    # 类级缓存: 两张表都是全市场快照, 原实现每只候选股重拉一次(N×M 次请求),
+    # 东财不可达时空跑48次(2026-09-14 实测)。源失败后进入冷却, 期间所有票直接中性。
+    _recommend_df: "pd.DataFrame" = None
+    _recommend_day: str = None
+    _hold_cache: Dict[str, "pd.DataFrame"] = {}
+    _down_until: float = 0.0
+    DOWN_COOLDOWN = 600
+
+    @classmethod
+    def _is_down(cls) -> bool:
+        import time as _time
+        return _time.time() < cls._down_until
+
+    @classmethod
+    def _mark_down(cls, what: str, err):
+        import time as _time
+        cls._down_until = _time.time() + cls.DOWN_COOLDOWN
+        logger.warning("机构%s接口不可达, 冷却%d秒(期间该因子保持中性): %s",
+                       what, cls.DOWN_COOLDOWN, err)
+
+    def _get_recommend(self):
+        """投资评级选股全量快照(当日缓存)。源不可用返回 None。"""
+        import akshare as ak
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._recommend_day == today and self._recommend_df is not None:
+            return self._recommend_df
+        try:
+            df = ak.stock_institute_recommend(symbol="投资评级选股")
+        except Exception as e:
+            self._mark_down("推荐", e)
+            return None
+        InstitutionalResearch._recommend_df = df
+        InstitutionalResearch._recommend_day = today
+        return df
+
+    def _get_hold(self, period: str):
+        """机构持仓单报告期快照(按报告期缓存)。源不可用返回 None。"""
+        import akshare as ak
+        if period in self._hold_cache:
+            return self._hold_cache[period]
+        try:
+            df = ak.stock_institute_hold(symbol=period)
+        except Exception as e:
+            self._mark_down("持仓", e)
+            return None
+        self._hold_cache[period] = df
+        return df
+
+    @staticmethod
+    def _recent_periods(n: int = 3):
+        """最近 n 个已披露报告期(akshare 口径 "YYYYQ", 如 20262=2026年中报)。
+
+        原实现硬编码 ["20051", "20251", "20241"]: 首位 20051 是 2005 年一季度,
+        即该因子长期取的是二十年前(及隔年)的持仓数据——数据出处错了, 分数自然无效。
+        """
+        now = datetime.now()
+        year, quarter = now.year, (now.month - 1) // 3 + 1
+        quarter -= 1  # 当季财报尚未披露, 从上一季开始回溯
+        if quarter == 0:
+            quarter, year = 4, year - 1
+        periods = []
+        for _ in range(n):
+            periods.append(f"{year}{quarter}")
+            quarter -= 1
+            if quarter == 0:
+                quarter, year = 4, year - 1
+        return periods
+
     def analyze(self, stock_code: str) -> Dict:
         """分析机构调研情况"""
         result = {
@@ -223,11 +296,12 @@ class InstitutionalResearch:
         }
 
         code = stock_code.replace("sh", "").replace("sz", "").replace("bj", "")
+        if self._is_down():
+            return result  # 数据源已确认不可达, 冷却期内不逐票重试
 
         # 机构推荐（获取全量后按代码过滤）
         try:
-            import akshare as ak
-            research = ak.stock_institute_recommend(symbol="投资评级选股")
+            research = self._get_recommend()
             if research is not None and not research.empty:
                 # 按股票代码过滤
                 code_col = "股票代码" if "股票代码" in research.columns else None
@@ -257,28 +331,25 @@ class InstitutionalResearch:
 
         # 机构持仓（获取全量后按代码过滤）
         try:
-            import akshare as ak
-            # 获取最近季度的机构持仓
-            for q in ["20051", "20251", "20241"]:
-                try:
-                    report = ak.stock_institute_hold(symbol=q)
-                    if report is not None and not report.empty:
-                        code_col = "证券代码" if "证券代码" in report.columns else None
-                        if code_col:
-                            stock_hold = report[report[code_col].astype(str) == code]
-                            if not stock_hold.empty:
-                                hold_info = stock_hold.iloc[0]
-                                inst_count = hold_info.get("机构数", 0) or 0
-                                hold_ratio = hold_info.get("持股比例", 0) or 0
-                                if inst_count > 0:
-                                    result["research_signals"].append(
-                                        f"{inst_count}家机构持有，持股比例{hold_ratio}%"
-                                    )
-                                    result["research_score"] = min(result["research_score"] + 10, 90)
-                                break
-                except Exception as e:
-                    logger.warning(f"解析机构调研数据失败: {e}")
-                    continue
+            # 获取最近已披露报告期的机构持仓
+            for q in self._recent_periods():
+                report = self._get_hold(q)
+                if report is None:
+                    break  # 源已熔断, 不再试后续报告期
+                if report is not None and not report.empty:
+                    code_col = "证券代码" if "证券代码" in report.columns else None
+                    if code_col:
+                        stock_hold = report[report[code_col].astype(str) == code]
+                        if not stock_hold.empty:
+                            hold_info = stock_hold.iloc[0]
+                            inst_count = hold_info.get("机构数", 0) or 0
+                            hold_ratio = hold_info.get("持股比例", 0) or 0
+                            if inst_count > 0:
+                                result["research_signals"].append(
+                                    f"{inst_count}家机构持有，持股比例{hold_ratio}%"
+                                )
+                                result["research_score"] = min(result["research_score"] + 10, 90)
+                            break
 
         except Exception as e:
             logger.warning("[phase2_market_intel.py:282] InstitutionalResearch/analyze 失败(忽略): %s", e)
@@ -338,6 +409,21 @@ class DragonTigerBoard:
     # 类级缓存：龙虎榜数据 T+1 公布，盘前查当天必然为空
     _lhb_cache: Dict[str, pd.DataFrame] = {}
     _lhb_cache_date: str = None
+    # 主备源都不可用时进入冷却, 避免每只票把 5 天窗口重试一遍(2026-09-14: 东财挂时14次无效请求)
+    _lhb_down_until: float = 0.0
+    DOWN_COOLDOWN = 600
+
+    @classmethod
+    def _mark_lhb_down(cls, err):
+        import time as _time
+        cls._lhb_down_until = _time.time() + cls.DOWN_COOLDOWN
+        logger.warning("龙虎榜源不可达, 冷却%d秒(期间该因子保持中性): %s",
+                       cls.DOWN_COOLDOWN, err)
+
+    @classmethod
+    def _is_lhb_down(cls) -> bool:
+        import time as _time
+        return _time.time() < cls._lhb_down_until
 
     def _get_lhb_data(self) -> pd.DataFrame:
         """获取最近交易日的龙虎榜明细（带类级缓存）。
@@ -347,11 +433,15 @@ class DragonTigerBoard:
         """
         import akshare as ak
 
+        if self._is_lhb_down():
+            return pd.DataFrame()
+
         today_str = datetime.now().strftime("%Y-%m-%d")
         if self._lhb_cache_date == today_str and self._lhb_cache:
             latest = max(self._lhb_cache.keys())
             return self._lhb_cache[latest]
 
+        errs = 0
         for days_ago in range(1, 6):
             d = (datetime.now() - timedelta(days=days_ago)).strftime("%Y%m%d")
             if d in self._lhb_cache:
@@ -363,8 +453,12 @@ class DragonTigerBoard:
                     self._lhb_cache_date = today_str
                     return df
             except Exception as e:
+                errs += 1
                 logger.warning(f"获取龙虎榜数据失败: {e}")
                 continue
+        # 只按"异常"熔断: 连续几天无数据可能只是长假(正常), 不应据此判定源故障
+        if errs >= 3:
+            self._mark_lhb_down(f"{errs}个交易日查询异常")
         return pd.DataFrame()
 
     def analyze(self, stock_code: str) -> Dict:
@@ -438,13 +532,23 @@ class DragonTigerBoard:
             logger.warning("[phase2_market_intel.py:435] DragonTigerBoard/analyze 失败(忽略): %s", e)
 
         # 备源：sina（也用最近交易日）
+        if self._is_lhb_down():
+            result["lh_score"] = max(0, min(100, result["lh_score"]))
+            return result
         try:
             from datetime import datetime, timedelta
             for days_ago in range(1, 6):
                 d = (datetime.now() - timedelta(days=days_ago)).strftime("%Y%m%d")
                 df_sina = ak.stock_lhb_detail_daily_sina(date=d)
                 if df_sina is not None and not df_sina.empty:
-                    match = df_sina[df_sina["股票代码"].astype(str) == code]
+                    # akshare 版本差异: 代码列曾为"股票代码", 现为"代码"/"code"
+                    code_col = next(
+                        (c for c in df_sina.columns
+                         if str(c) in ("股票代码", "代码", "code", "证券代码")),
+                        None)
+                    if code_col is None:
+                        break
+                    match = df_sina[df_sina[code_col].astype(str).str[-6:] == code]
                     if not match.empty:
                         row = match.iloc[0]
                         change_pct = float(row.get("对应值", 0) or 0)
@@ -460,6 +564,7 @@ class DragonTigerBoard:
                     break
         except Exception as e:
             logger.warning("[phase2_market_intel.py:459] DragonTigerBoard/analyze 失败(忽略): %s", e)
+            self._mark_lhb_down(f"新浪备源异常: {e}")
 
         result["lh_score"] = max(0, min(100, result["lh_score"]))
         return result

@@ -15,6 +15,12 @@ from typing import List, Dict, Set
 
 
 class ConceptMap:
+    # 连续失败多少次判定概念板块源不可达并放弃本轮同步
+    SYNC_FAIL_STREAK = 3
+    # 板块列表单次拉取超时(秒)。东财不可达时 akshare 内部会长时间重试,
+    # 实测卡住 25 分钟(2026-09-14), 必须外部限时。
+    SYNC_TIMEOUT = 90
+
     def __init__(self, config_path: str = None, auto_sync: bool = False):
         if config_path is None:
             config_path = os.path.join(
@@ -68,8 +74,16 @@ class ConceptMap:
 
         try:
             import akshare as ak
+            import concurrent.futures as _cf
             logger.info('  🔄 同步 akshare 概念板块成分股（首次或过期，需 1-3 分钟）...')
-            board_df = ak.stock_board_concept_name_em()
+            # 东财不可达时 akshare 内部重试无上限, 用子线程 + 超时强制放弃;
+            # shutdown(wait=False) 避免超时后主线程被挂起的请求线程拖死
+            _ex = _cf.ThreadPoolExecutor(max_workers=1)
+            try:
+                board_df = _ex.submit(
+                    ak.stock_board_concept_name_em).result(timeout=self.SYNC_TIMEOUT)
+            finally:
+                _ex.shutdown(wait=False, cancel_futures=True)
             if board_df is None or board_df.empty:
                 return False
 
@@ -77,6 +91,7 @@ class ConceptMap:
             auto_concepts = {}
             existing = set(self._data.get("concepts", {}).keys())
             synced_count = 0
+            fail_streak = 0
 
             for board_name in board_names:
                 # 跳过原有静态映射中已存在的概念（避免覆盖）
@@ -98,7 +113,18 @@ class ConceptMap:
                     synced_count += 1
                 except Exception as e:
                     logger.warning(f"同步概念板块失败: {e}")
+                    fail_streak += 1
+                    # 东财整体不可达时逐个板块重试毫无意义:
+                    # 400+ 板块 × 5s ≈ 30分钟空转(2026-09-14 实测), 连续失败即熔断
+                    if fail_streak >= self.SYNC_FAIL_STREAK:
+                        logger.info("  ⚠️ 概念板块源连续失败, 放弃本轮同步(保留已有缓存)")
+                        return False
                     continue
+
+            # 全失败时不得写缓存: 空结果会覆盖掉已积累的板块成分股
+            if not auto_concepts:
+                logger.info("  ⚠️ 本轮无新增概念板块, 不覆盖已有缓存")
+                return False
 
             # 写入缓存
             with open(self.sync_cache_path, "w", encoding="utf-8") as f:

@@ -173,11 +173,17 @@ class AShareCharacteristics:
             return factors
 
         current_turnover = turnover.iloc[-1]
-        avg_turnover = turnover.tail(20).mean()
-        turnover_ratio = current_turnover / avg_turnover if avg_turnover > 0 else 1
+        if pd.isna(current_turnover):
+            return factors
 
-        factors["current_turnover"] = round(current_turnover, 2)
-        factors["turnover_ratio"] = round(turnover_ratio, 2)
+        avg_turnover = turnover.tail(20).mean()
+        if pd.isna(avg_turnover) or avg_turnover <= 0:
+            return factors
+
+        turnover_ratio = current_turnover / avg_turnover
+
+        factors["current_turnover"] = round(float(current_turnover), 2)
+        factors["turnover_ratio"] = round(float(turnover_ratio), 2)
 
         # 换手率异动信号
         if turnover_ratio > 3:

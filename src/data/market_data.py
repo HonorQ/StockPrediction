@@ -70,6 +70,10 @@ class MarketDataFetcher:
         self._warned_bs = False
         self._industry_map: Optional[Dict[str, str]] = None
         self._db = None  # 延迟初始化: 本地K线数据库
+        # 盘前本地K线新鲜度判定的缓存(上一交易日 + 查询时刻)
+        self._prev_trade_date_val = None
+        self._prev_trade_date_day = None
+        self._prev_trade_date_ts = 0.0
 
     # === 委托方法: 逻辑已拆至独立模块, 此处保持向后兼容接口 ===
 
@@ -114,6 +118,10 @@ class MarketDataFetcher:
                     today = _dt.now().strftime("%Y-%m-%d")
                     if row[0] >= today:
                         return self._db.get_klines(clean, days)
+                    # 开盘前市场不可能有当日K线: 本地只要同步到"上一交易日"即算最新。
+                    # 否则盘前每只票都会打一次网络, 全市场累计上千次请求触发腾讯WAF(501)。
+                    if self._is_preopen() and row[0] >= (self._market_prev_trade_date(today) or ""):
+                        return self._db.get_klines(clean, days)
         except Exception as e:
             # 本地DB查询失败属常规降级(网络源兜底), debug级留痕避免刷屏
             logging.getLogger("stock_prediction").debug(
@@ -125,6 +133,35 @@ class MarketDataFetcher:
             db=self._db
         )
         return fetcher.get_stock_history(code, days=days)
+
+    @staticmethod
+    def _is_preopen() -> bool:
+        """当前是否处于开盘前(09:30 之前)。此时任何数据源都不会有当日K线。"""
+        from datetime import datetime as _dt
+        now = _dt.now()
+        return (now.hour, now.minute) < (9, 30)
+
+    _PREV_TRADE_DATE_TTL = 600
+
+    def _market_prev_trade_date(self, today: str):
+        """库中早于 today 的最新交易日(缓存10分钟)。用于盘前判断本地K线是否已同步到最新。"""
+        import time as _time
+        now = _time.time()
+        if (self._prev_trade_date_val and self._prev_trade_date_day == today
+                and now - self._prev_trade_date_ts < self._PREV_TRADE_DATE_TTL):
+            return self._prev_trade_date_val
+        try:
+            with self._db._connection() as conn:
+                cur = conn.execute(
+                    "SELECT MAX(trade_date) FROM kline_daily WHERE trade_date < ?", (today,))
+                row = cur.fetchone()
+        except Exception as e:
+            logging.getLogger("stock_prediction").debug("上一交易日查询失败: %s", e)
+            return None
+        self._prev_trade_date_val = row[0] if row else None
+        self._prev_trade_date_day = today
+        self._prev_trade_date_ts = now
+        return self._prev_trade_date_val
 
     def _fetch_tencent_quotes(self, codes):
         """腾讯实时行情批量查询"""
